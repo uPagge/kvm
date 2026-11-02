@@ -614,3 +614,81 @@ func TestReceiverControlDrainTimeoutAbortsRebindAndCanRetry(t *testing.T) {
 		t.Fatalf("retry: callback=%v error=%v", called, err)
 	}
 }
+
+// A duplicate enable is not a transport epoch. Exercise the real responder and
+// bound check against an ordinary fixture directory, without a sysfs mutation.
+func TestReceiverControlRepeatedEnablePreservesNotificationFlags(t *testing.T) {
+	u := receiverTestGadget(t)
+	// IsUDCBound joins this value onto dwc3Path. A relative path to our own
+	// existing fixture supplies the bound observation without a new production seam.
+	var err error
+	u.udc, err = filepath.Rel(dwc3Path, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.receiverControl.owned = true
+	r, w := reportPipe(t)
+	u.relMouseHidFile = w
+	opened := make(chan int, 3)
+	u.receiverControl.openReader = func(string, int) (int, error) {
+		fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+		if err != nil {
+			return 0, err
+		}
+		if err := unix.SetNonblock(fds[0], true); err != nil {
+			unix.Close(fds[0])
+			unix.Close(fds[1])
+			return 0, err
+		}
+		opened <- fds[1]
+		return fds[0], nil
+	}
+	var peers []int
+	defer func() {
+		u.Close()
+		for _, peer := range peers {
+			unix.Close(peer)
+		}
+		for len(opened) > 0 {
+			unix.Close(<-opened)
+		}
+	}()
+	if err := u.startReceiverControl(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case peer := <-opened:
+		peers = append(peers, peer)
+	case <-time.After(time.Second):
+		t.Fatal("reader did not open")
+	}
+	send := func(peer int, packet, want []byte) {
+		t.Helper()
+		if _, err := unix.Write(peer, packet); err != nil {
+			t.Fatal(err)
+		}
+		readReport(t, r, want)
+	}
+	send(peers[0], []byte{0x10, 0xff, 0x80, 0, 0, 9, 0}, []byte{0x10, 0xff, 0x80, 0, 0, 0, 0})
+	send(peers[0], []byte{0x10, 0xff, 0x81, 0, 0, 0, 0}, []byte{0x10, 0xff, 0x81, 0, 0, 9, 0})
+	u.receiverControl.mu.Lock()
+	generation, done := u.receiverControl.generation, u.receiverControl.done
+	u.receiverControl.mu.Unlock()
+	if err := u.SetEmulationEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	u.receiverControl.mu.Lock()
+	changed := generation != u.receiverControl.generation || done != u.receiverControl.done
+	u.receiverControl.mu.Unlock()
+	peer := peers[0]
+	if changed {
+		t.Error("duplicate enable replaced the responder generation")
+		select {
+		case peer = <-opened:
+			peers = append(peers, peer)
+		case <-time.After(time.Second):
+			t.Fatal("replacement reader did not open")
+		}
+	}
+	send(peer, []byte{0x10, 0xff, 0x81, 0, 0, 0, 0}, []byte{0x10, 0xff, 0x81, 0, 0, 9, 0})
+}

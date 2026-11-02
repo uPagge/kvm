@@ -236,15 +236,19 @@ func (u *UsbGadget) IsGadgetAttachedToUDC() bool {
 // SetEmulationEnabled enables or disables USB emulation after draining HID opens
 // and closing cached handles, so no old descriptor survives the controller change.
 func (u *UsbGadget) SetEmulationEnabled(enabled bool) error {
-	return u.rebindUsbWith(func() error {
-		bound, err := u.IsUDCBound()
-		if err != nil {
-			return err
-		}
-		// A repeated request must not close healthy HID handles or their LED reader.
-		if bound == enabled {
-			return nil
-		}
+	u.configLock.Lock()
+	defer u.configLock.Unlock()
+
+	bound, err := u.IsUDCBound()
+	if err != nil {
+		return err
+	}
+	// A repeated request must preserve healthy handles, their readers and the
+	// receiver notification flags. Decide before retiring a transport epoch.
+	if bound == enabled {
+		return nil
+	}
+	return u.withHIDRebind(func() error {
 		u.ResetHIDFiles()
 		if enabled {
 			return u.BindUDC()
