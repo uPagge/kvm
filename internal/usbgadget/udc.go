@@ -27,10 +27,7 @@ func getUdcs() []string {
 	return udcs
 }
 
-// hidgDevicePath is the chardev used to verify HID function health after rebind.
-const hidgDevicePath = "/dev/hidg0"
-
-func rebindUsb(udc string, ignoreUnbindError bool) error {
+func rebindUsb(udc string, ignoreUnbindError bool, healthy func() bool) error {
 	_ = softDisconnect(udc)
 
 	err := os.WriteFile(path.Join(dwc3Path, "unbind"), []byte(udc), 0644)
@@ -47,7 +44,7 @@ func rebindUsb(udc string, ignoreUnbindError bool) error {
 	// returning ENXIO even though the sysfs entry and device node exist.
 	// Verify the chardev is functional; if not, rebind once more with a
 	// brief pause to allow the kernel to finish cleanup.
-	if !isHidgChardevHealthy() {
+	if !healthy() {
 		_ = os.WriteFile(path.Join(dwc3Path, "unbind"), []byte(udc), 0644)
 		time.Sleep(100 * time.Millisecond)
 		if err := os.WriteFile(path.Join(dwc3Path, "bind"), []byte(udc), 0644); err != nil {
@@ -114,16 +111,22 @@ func (u *UsbGadget) SoftReconnect() error {
 	u.configLock.Lock()
 	defer u.configLock.Unlock()
 
-	if err := softDisconnect(u.udc); err != nil {
-		return err
-	}
-	// The host re-enumerates on reconnect, the same as after a rebind.
-	u.resetHidHandover()
-	return softConnect(u.udc)
+	return u.withHIDRebind(func() error {
+		if err := softDisconnect(u.udc); err != nil {
+			return err
+		}
+		// The host re-enumerates on reconnect, the same as after a rebind.
+		u.resetHidHandover()
+		return softConnect(u.udc)
+	})
 }
 
-func isHidgChardevHealthy() bool {
-	f, err := os.OpenFile(hidgDevicePath, os.O_RDWR, 0)
+func (u *UsbGadget) isHidgChardevHealthy() bool {
+	devicePath, err := u.hidDevicePath("keyboard", "/dev/hidg0")
+	if err != nil {
+		return false
+	}
+	f, err := u.openHIDFile(devicePath, os.O_RDWR, 0)
 	if err != nil {
 		return false
 	}
@@ -137,7 +140,7 @@ func (u *UsbGadget) rebindUsb(ignoreUnbindError bool) error {
 	// from the previous bind would drop the fresh refcount to zero when they
 	// are finally closed, and every open after that fails with ENXIO.
 	u.ResetHIDFiles()
-	if err := rebindUsb(u.udc, ignoreUnbindError); err != nil {
+	if err := rebindUsb(u.udc, ignoreUnbindError, u.isHidgChardevHealthy); err != nil {
 		return err
 	}
 	u.resetHidHandover()
@@ -163,7 +166,26 @@ func (u *UsbGadget) rebindUsbWith(rebind func() error) error {
 }
 
 // withHIDRebind requires configLock and excludes HID access during a rebind.
-func (u *UsbGadget) withHIDRebind(rebind func() error) error {
+func (u *UsbGadget) withHIDRebind(rebind func() error) (result error) {
+	// Restart only after releasing lifecycle and keyboard gates (defer LIFO).
+	defer func() {
+		if result == nil {
+			result = u.startReceiverControl()
+		}
+	}()
+
+	// Keyboard writers hold keyboardMutex through both IO and state commit.
+	// Wait for that whole transaction before taking exclusive lifecycle: the
+	// opposite order deadlocks with a writer holding keyboardMutex while
+	// waiting for lifecycle admission. Internal rebind bodies must not relock.
+	keyboardMutex.Lock()
+	defer keyboardMutex.Unlock()
+	// Retire and join the reader before lifecycle exclusion: it may be paused
+	// before a read, reply or open return and need that lock to close its old FD.
+	u.stopReceiverControl()
+	if err := u.drainReceiverControl(hidOpenDrainTimeout); err != nil {
+		return err
+	}
 	u.hidLifecycle.Lock()
 	defer u.hidLifecycle.Unlock()
 	// An open may outlive its caller's timeout. It must return and close its

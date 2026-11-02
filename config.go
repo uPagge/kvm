@@ -123,6 +123,8 @@ type Config struct {
 	NativeMaxRestart     uint                 `json:"native_max_restart_attempts"`
 	MqttConfig           *MQTTConfig          `json:"mqtt_config"`
 	AudioEnabled         bool                 `json:"audio_enabled"`
+
+	StandardRelativeAudioConfigVersion int `json:"standard_relative_audio_config_version"`
 }
 
 // GetUpdateAPIURL returns the update API URL
@@ -169,24 +171,24 @@ var (
 		VendorId:     "0x1d6b", //The Linux Foundation
 		ProductId:    "0x0104", //Multifunction Composite Gadget
 		SerialNumber: "",
-		Manufacturer: "JetKVM",
-		Product:      "USB Emulation Device",
+		Manufacturer: "",
+		Product:      "USB Input Device",
 	}
 	defaultUsbDevices = usbgadget.Devices{
-		AbsoluteMouse: true,
+		Profile:       usbgadget.HIDProfileStandardRelative,
 		RelativeMouse: true,
 		Keyboard:      true,
-		MassStorage:   true,
-		Audio:         true,
 	}
 )
 
 func getDefaultConfig() Config {
 	return Config{
+		StandardRelativeAudioConfigVersion: 1,
+
 		CloudURL:             DefaultAPIURL,
 		UpdateAPIURL:         DefaultAPIURL,
 		CloudAppURL:          "https://app.jetkvm.com",
-		AutoUpdateEnabled:    true, // Set a default value
+		AutoUpdateEnabled:    false, // Stock OTA would replace the fork.
 		ActiveExtension:      "",
 		KeyboardMacros:       []KeyboardMacro{},
 		DisplayRotation:      "270",
@@ -220,8 +222,9 @@ func getDefaultConfig() Config {
 }
 
 var (
-	config     *Config
-	configLock = &sync.Mutex{}
+	config          *Config
+	configLoadError error
+	configLock      = &sync.Mutex{}
 )
 
 var (
@@ -240,6 +243,10 @@ var (
 )
 
 func LoadConfig() {
+	loadConfigFromPath(configPath)
+}
+
+func loadConfigFromPath(path string) {
 	configLock.Lock()
 	defer configLock.Unlock()
 
@@ -252,7 +259,7 @@ func LoadConfig() {
 	defaultConfig := getDefaultConfig()
 	config = &defaultConfig
 
-	file, err := os.Open(configPath)
+	file, err := os.Open(path)
 	if err != nil {
 		logger.Debug().Msg("default config file doesn't exist, using default")
 		configSuccess.Set(1.0)
@@ -271,6 +278,7 @@ func LoadConfig() {
 
 	loadedConfig := defaultConfig
 	if err := json.Unmarshal(rawConfig, &loadedConfig); err != nil {
+		configLoadError = err
 		logger.Warn().Err(err).Msg("config file JSON parsing failed")
 		configSuccess.Set(0.0)
 		return
@@ -283,8 +291,6 @@ func LoadConfig() {
 
 	if loadedConfig.UsbDevices == nil {
 		loadedConfig.UsbDevices = getDefaultConfig().UsbDevices
-	} else if !usbDevicesConfigHasAudio(rawConfig) {
-		loadedConfig.UsbDevices.Audio = defaultUsbDevices.Audio
 	}
 
 	if !loadedConfig.UsbDevices.Audio {
@@ -317,13 +323,19 @@ func LoadConfig() {
 	//     advertised only 1080p60 + 720p60 in the base block)
 	//   - JetKVM v1 EDID with 720p120 in CTA extension only (NVIDIA didn't pick
 	//     it up; superseded by base-block DTD1 = 720p120)
+	//   - The pinned upstream 0.5.9 default with 720p120 in the base block
+	//   - The exact installed first-stage authored 1080p60 JetKVM identity
 	const tsbDefaultEDID = "00ffffffffffff0052620188008888881c150103800000780a0dc9a05747982712484c00000001010101010101010101010101010101023a801871382d40582c4500c48e2100001e011d007251d01e206e285500c48e2100001e000000fc00543734392d6648443732300a20000000fd00147801ff1d000a202020202020017b"
 	const jkvV1NoHighRefresh = "00ffffffffffff0028b4010001eeffc0302301038047287856ee91a3544c99260f5054000000d1c081c0318001010101010101010101023a801871382d40582c4500c48e2100001e011d007251d01e206e285500c48e2100001e000000fd00174c0f5111000a202020202020000000fc004a65744b564d2076310a202020011d020322d1431004012309070783010000e200cfe40d100401e305000065030c001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000cf"
 	const jkvV1CtaOnly120 = "00ffffffffffff0028b4010001eeffc0302301038047287856ee91a3544c99260f5054000000d1c081c0318001010101010101010101023a801871382d40582c4500c48e2100001e011d007251d01e206e285500c48e2100001e000000fd00174c0f5111000a202020202020000000fc004a65744b564d2076310a202020011d020322d1431004012309070783010000e200cfe40d100401e305000065030c001000773300a050d02b2030203500122c2100001a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001c"
+	const jkvV1Base120 = "00FFFFFFFFFFFF0028B4010001EEFFC0302301038047287856EE91A3544C99260F5054000000D1C081C0318001010101010101010101023A801871382D40582C4500C48E2100001E773300A050D02B2030203500122C2100001A000000FD00174C0F5111000A202020202020000000FC004A65744B564D2076310A20202001D5020322D1431004012309070783010000E200CFE40D100401E305000065030C001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000CF"
+	const jkvAuthored1080p60 = "00FFFFFFFFFFFF0028B40100000000000024010380341D7802EE91A3544C99260F505400000001010101010101010101010101010101023A801871382D40582C450008222100001E000000FD003B3D43450F000A202020202020000000FC004A65744B564D2031303830700A00000010000000000000000000000000000001FF02030C00419065030C001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000009A"
 	if loadedConfig.EdidString == "" ||
 		strings.EqualFold(loadedConfig.EdidString, tsbDefaultEDID) ||
 		strings.EqualFold(loadedConfig.EdidString, jkvV1NoHighRefresh) ||
-		strings.EqualFold(loadedConfig.EdidString, jkvV1CtaOnly120) {
+		strings.EqualFold(loadedConfig.EdidString, jkvV1CtaOnly120) ||
+		strings.EqualFold(loadedConfig.EdidString, jkvV1Base120) ||
+		strings.EqualFold(loadedConfig.EdidString, jkvAuthored1080p60) {
 		loadedConfig.EdidString = native.DefaultEDID
 	}
 
@@ -334,20 +346,7 @@ func LoadConfig() {
 	configSuccess.Set(1.0)
 	configSuccessTime.SetToCurrentTime()
 
-	logger.Info().Str("path", configPath).Msg("config loaded")
-}
-
-func usbDevicesConfigHasAudio(rawConfig []byte) bool {
-	var payload struct {
-		UsbDevices map[string]json.RawMessage `json:"usb_devices"`
-	}
-
-	if err := json.Unmarshal(rawConfig, &payload); err != nil || payload.UsbDevices == nil {
-		return true
-	}
-
-	_, ok := payload.UsbDevices["audio"]
-	return ok
+	logger.Info().Str("path", path).Msg("config loaded")
 }
 
 func SaveConfig() error {

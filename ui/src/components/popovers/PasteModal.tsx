@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useClose } from "@headlessui/react";
 import { ExclamationCircleIcon } from "@heroicons/react/16/solid";
 import { LuCornerDownLeft, LuEye, LuEyeOff } from "react-icons/lu";
@@ -183,7 +183,7 @@ export default function PasteModal() {
                         }
                         rows={4}
                         value={textValue}
-                        style={hideText ? { WebkitTextSecurity: "disc" } : undefined}
+                        style={hideText ? ({ WebkitTextSecurity: "disc" } as CSSProperties & { WebkitTextSecurity: "disc" }) : undefined}
                         onKeyUp={e => e.stopPropagation()}
                         maxLength={pasteMaxLength}
                         onKeyDown={e => {

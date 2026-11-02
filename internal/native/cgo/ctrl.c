@@ -97,14 +97,27 @@ int video_send_frame(const uint8_t *frame, ssize_t len)
  */
 int hex_to_bytes(const char *hex_str, uint8_t *bytes, size_t max_len)
 {
+    if (hex_str == NULL || bytes == NULL)
+    {
+        return -1;
+    }
     size_t hex_len = strnlen(hex_str, 4096);
-    if (hex_len % 2 != 0 || hex_len / 2 > max_len)
+    if (hex_len == 4096 || hex_len % 2 != 0 || hex_len / 2 > max_len)
     {
         return -1; // Invalid input length or insufficient output buffer
     }
 
     for (size_t i = 0; i < hex_len; i += 2)
     {
+        for (size_t j = i; j < i + 2; j++)
+        {
+            char ch = hex_str[j];
+            if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
+                  (ch >= 'A' && ch <= 'F')))
+            {
+                return -1;
+            }
+        }
         char byte_str[3] = {hex_str[i], hex_str[i + 1], '\0'};
         char *end_ptr;
         long value = strtol(byte_str, &end_ptr, 16);

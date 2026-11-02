@@ -15,6 +15,7 @@ import { SettingsPageHeader } from "@components/SettingsPageheader";
 import { JigglerSetting } from "@components/JigglerSetting";
 import notifications from "@/notifications";
 import { m } from "@localizations/messages.js";
+import { useUsbProfile } from "@hooks/useUsbProfile";
 
 export interface JigglerConfig {
   inactivity_limit_seconds: number;
@@ -66,13 +67,13 @@ export default function SettingsMouseRoute() {
   const {
     isCursorHidden,
     setCursorVisibility,
-    mouseMode,
     setMouseMode,
     scrollThrottling,
     setScrollThrottling,
     invertScroll,
     setInvertScroll,
   } = useSettingsStore();
+  const { mouseMode, profile } = useUsbProfile();
 
   const [selectedJigglerOption, setSelectedJigglerOption] = useState<JigglerValues | null>(null);
   const [currentJigglerConfig, setCurrentJigglerConfig] = useState<JigglerConfig | null>(null);
@@ -244,10 +245,18 @@ export default function SettingsMouseRoute() {
           </SettingsNestedSection>
         )}
         <div className="space-y-4">
-          <SettingsItem title={m.mouse_modes_title()} description={m.mouse_modes_description()} />
+          <SettingsItem
+            title={m.mouse_modes_title()}
+            description={
+              (profile === "standard-relative" || profile === "receiver-enumeration")
+                ? m.usb_standard_relative_description()
+                : m.mouse_modes_description()
+            }
+          />
           <div className="flex items-center gap-4">
             <button
               className="group block grow"
+              disabled={profile !== ""}
               onClick={() => {
                 setMouseMode("absolute");
               }}

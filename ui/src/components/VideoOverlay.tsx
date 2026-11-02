@@ -11,6 +11,7 @@ import LoadingSpinner from "@components/LoadingSpinner";
 import Card, { GridCard } from "@components/Card";
 import { useRTCStore, PostRebootAction } from "@/hooks/stores";
 import { useJsonRpc } from "@/hooks/useJsonRpc";
+import { useUsbProfile } from "@hooks/useUsbProfile";
 import LogoBlue from "@/assets/logo-blue.svg";
 import LogoWhite from "@/assets/logo-white.svg";
 import { isOnDevice } from "@/main";
@@ -260,7 +261,8 @@ export function HDMIErrorOverlay({ show, hdmiState }: HDMIErrorOverlayProps) {
   const wakeAttemptTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isNoSignal = hdmiState === "no_signal";
   const isOtherError = hdmiState === "no_lock" || hdmiState === "out_of_range";
-  const canWakeHost = isNoSignal;
+  const { profile } = useUsbProfile();
+  const canWakeHost = isNoSignal && profile === "";
 
   useEffect(() => {
     return () => {

@@ -14,7 +14,7 @@ import type { SignalingHook } from "./types";
 // React Router matches the route with a trailing slash and in any case.
 const isOtherSessionPath = (path: string) => /\/other-session\/?$/i.test(path);
 
-const useWebSocket = pkg.default ?? pkg;
+const useWebSocket = (pkg as typeof pkg & { default?: typeof pkg }).default ?? pkg;
 
 /**
  * Removes H.265 from each video transceiver's preferred codec list so the

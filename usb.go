@@ -1,6 +1,7 @@
 package kvm
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -10,12 +11,23 @@ import (
 
 var gadget *usbgadget.UsbGadget
 
+func requireMassStorage() error {
+	devices := effectiveUsbDevices()
+	if devices == nil || !devices.MassStorage {
+		return fmt.Errorf("USB mass storage is disabled")
+	}
+	if gadget == nil {
+		return fmt.Errorf("USB gadget is not initialized")
+	}
+	return nil
+}
+
 func effectiveUsbDevices() *usbgadget.Devices {
 	if config == nil || config.UsbDevices == nil {
 		return nil
 	}
 
-	devices := *config.UsbDevices
+	devices := usbgadget.NormalizeDevices(*config.UsbDevices)
 	return &devices
 }
 
@@ -23,18 +35,30 @@ func effectiveAudioEnabled() bool {
 	return config != nil &&
 		config.UsbDevices != nil &&
 		config.AudioEnabled &&
-		config.UsbDevices.Audio
+		effectiveUsbDevices().Audio
 }
 
 // initUsbGadget initializes the USB gadget.
 // call it only after the config is loaded.
-func initUsbGadget() {
+func initUsbGadget() error {
+	if configLoadError != nil {
+		return fmt.Errorf("invalid configuration: %w", configLoadError)
+	}
+	if config == nil || config.UsbDevices == nil {
+		return fmt.Errorf("USB configuration is not loaded")
+	}
+	if err := validateUSBProfile(config.UsbDevices.Profile); err != nil {
+		return err
+	}
 	gadget = usbgadget.NewUsbGadget(
 		"jetkvm",
 		effectiveUsbDevices(),
 		config.UsbConfig,
 		usbLogger,
 	)
+	if gadget == nil {
+		return fmt.Errorf("failed to initialize USB gadget")
+	}
 
 	setUSBRecoveryTimer(time.Now())
 
@@ -66,11 +90,15 @@ func initUsbGadget() {
 	if err := gadget.OpenKeyboardHidFile(); err != nil {
 		usbLogger.Error().Err(err).Msg("failed to open keyboard hid file")
 	}
+	return nil
 }
 
 // rpcHidReport wraps a HID gadget call with the common guard (skip if USB not
 // ready) and error suppression (swallow transient HID errors during rebind).
 func rpcHidReport(fn func() error) error {
+	if gadget == nil {
+		return fmt.Errorf("USB gadget is not initialized")
+	}
 	if !usbReadyForHidReports() {
 		return nil
 	}
@@ -89,6 +117,9 @@ func rpcKeypressReport(key byte, press bool) error {
 }
 
 func rpcAbsMouseReport(x int, y int, buttons uint8) error {
+	if devices := effectiveUsbDevices(); devices == nil || !devices.AbsoluteMouse {
+		return fmt.Errorf("absolute mouse is disabled")
+	}
 	return rpcHidReport(func() error { return gadget.AbsMouseReport(x, y, buttons) })
 }
 
@@ -106,6 +137,9 @@ func rpcWheelReport(wheelY int8, wheelX int8) error {
 }
 
 func rpcWakeHost() error {
+	if devices := effectiveUsbDevices(); devices != nil && usbgadget.IsRestrictedRelativeProfile(devices.Profile) {
+		return fmt.Errorf("wake is disabled by the HID profile")
+	}
 	if gadget == nil {
 		return fmt.Errorf("USB gadget is not initialized")
 	}
@@ -138,6 +172,32 @@ func rpcGetKeyboardLedState() (state usbgadget.KeyboardState) {
 
 func rpcGetKeysDownState() (state usbgadget.KeysDownState) {
 	return gadget.GetKeysDownState()
+}
+
+// rpcReleaseHIDInputs is called after session input admission has closed.
+// Attempt every enabled function even if another release fails.
+func rpcReleaseHIDInputs() error {
+	devices := effectiveUsbDevices()
+	if devices == nil || gadget == nil {
+		return nil
+	}
+	return rpcHidReport(func() error { return releaseHIDInputs(devices, gadget) })
+}
+
+type hidInputReleaser interface {
+	KeyboardReport(byte, []byte) error
+	RelMouseReport(int8, int8, uint8) error
+}
+
+func releaseHIDInputs(devices *usbgadget.Devices, target hidInputReleaser) error {
+	var keyboardErr, mouseErr error
+	if devices.Keyboard {
+		keyboardErr = target.KeyboardReport(0, keyboardClearStateKeys)
+	}
+	if devices.RelativeMouse {
+		mouseErr = target.RelMouseReport(0, 0, 0)
+	}
+	return errors.Join(keyboardErr, mouseErr)
 }
 
 var (

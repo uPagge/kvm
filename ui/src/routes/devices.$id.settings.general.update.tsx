@@ -11,6 +11,7 @@ import LoadingSpinner from "@components/LoadingSpinner";
 import UpdatingStatusCard, { type UpdatePart } from "@components/UpdatingStatusCard";
 import { m } from "@localizations/messages.js";
 import { sleep } from "@/utils";
+import notifications from "@/notifications";
 import {
   checkUpdateComponents,
   SystemVersionInfo,
@@ -48,9 +49,14 @@ export default function SettingsGeneralUpdateRoute() {
   }, [navigate, setShouldReload, shouldReload]);
 
   const onConfirmUpdate = useCallback(() => {
-    setShouldReload(true);
-    send("tryUpdate", {});
-    setModalView("updating");
+    send("tryUpdate", {}, response => {
+      if ("error" in response) {
+        notifications.error(response.error.data || m.fork_updates_description());
+        return;
+      }
+      setShouldReload(true);
+      setModalView("updating");
+    });
   }, [send, setModalView, setShouldReload]);
 
   const onConfirmCustomUpdate = useCallback(
@@ -59,14 +65,22 @@ export default function SettingsGeneralUpdateRoute() {
       if (appTargetVersion) components.app = appTargetVersion;
       if (systemTargetVersion) components.system = systemTargetVersion;
 
-      setShouldReload(true);
-      setModalView("updating");
-
-      send("tryUpdateComponents", {
-        params: { components },
-        includePreRelease: false,
-        resetConfig,
-      });
+      send(
+        "tryUpdateComponents",
+        {
+          params: { components },
+          includePreRelease: false,
+          resetConfig,
+        },
+        response => {
+          if ("error" in response) {
+            notifications.error(response.error.data || m.fork_updates_description());
+            return;
+          }
+          setShouldReload(true);
+          setModalView("updating");
+        },
+      );
     },
     [resetConfig, send, setModalView, setShouldReload],
   );
@@ -149,6 +163,9 @@ export function Dialog({
 
   return (
     <div className="pointer-events-auto relative mx-auto text-left">
+      <p className="mb-4 text-sm text-slate-600 dark:text-slate-300">
+        {m.fork_updates_description()}
+      </p>
       <div>
         {modalView === "error" && (
           <UpdateErrorState
@@ -534,6 +551,7 @@ function UpdateAvailableState({
             size="SM"
             theme="primary"
             text={m.general_update_now_button()}
+            disabled
             onClick={onConfirm}
             data-testid="update-now-button"
           />

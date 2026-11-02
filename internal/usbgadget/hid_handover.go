@@ -60,13 +60,21 @@ func loadHidHandover() (hidHandover, bool) {
 
 // resetHidHandover runs after a rebind. The host re-enumerated, which
 // released every input and makes it resend its LED state, so nothing from
-// before the rebind applies to the next adoption.
+// before the rebind applies to the next adoption. Caller holds keyboardMutex
+// before exclusive hidLifecycle; do not call public keyboard IO from here.
 func (u *UsbGadget) resetHidHandover() {
+	// Retire the old keyboard generation in memory as well as descriptors.
+	// A recovery probe must never replay its keys or modifiers after reconnect.
+	u.CancelAllAutoReleaseTimers()
+	u.UpdateKeysDown(0, make([]byte, hidKeyBufferSize))
 	// Hold the mouse lock through the write, or a press reported in between
 	// would be persisted and then overwritten.
 	u.absMouseLock.Lock()
 	defer u.absMouseLock.Unlock()
 	u.absMousePressed = false
+	u.relMouseLock.Lock()
+	u.relMouseButtons = 0
+	u.relMouseLock.Unlock()
 	updateHidHandover(func(h *hidHandover) { *h = hidHandover{} })
 }
 

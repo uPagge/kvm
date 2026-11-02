@@ -23,6 +23,13 @@ var (
 )
 
 func startAudio(track *webrtc.TrackLocalStaticSample) {
+	// Track negotiation may precede a successful USB/playback disable. Recheck
+	// admission atomically with capture startup so that stale tracks stay silent.
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
+	if !effectiveAudioEnabled() {
+		return
+	}
 	audioMu.Lock()
 	defer audioMu.Unlock()
 	stopAudioLocked()

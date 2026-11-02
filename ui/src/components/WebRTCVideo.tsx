@@ -54,8 +54,7 @@ export default function WebRTCVideo({
 
   const { send: sendRpc } = useJsonRpc();
 
-  const isPointerLockPossible =
-    window.location.protocol === "https:" || window.location.hostname === "localhost";
+  const isPointerLockPossible = typeof Element.prototype.requestPointerLock === "function";
 
   // Store hooks
   const settings = useSettingsStore();
@@ -65,6 +64,7 @@ export default function WebRTCVideo({
     getAbsMouseMoveHandler,
     getMouseWheelHandler,
     resetMousePosition,
+    mouseMode,
   } = useMouse();
   const {
     setClientSize: setVideoClientSize,
@@ -195,18 +195,22 @@ export default function WebRTCVideo({
   }, []);
 
   const requestPointerLock = useCallback(async () => {
-    if (!isPointerLockPossible || videoElm.current === null || document.pointerLockElement) return;
+    if (videoElm.current === null || document.pointerLockElement) return;
 
-    const isPointerLockGranted = await checkNavigatorPermissions("pointer-lock");
-
-    if (isPointerLockGranted && settings.mouseMode === "relative") {
+    // The permission query can be unsupported or return "prompt". A trusted
+    // video click requests the API itself so the browser can start capture.
+    if (mouseMode === "relative") {
+      if (!isPointerLockPossible) {
+        notifications.error(m.video_pointer_lock_disabled());
+        return;
+      }
       try {
         await videoElm.current.requestPointerLock();
       } catch {
-        // ignore errors
+        notifications.error(m.video_pointer_lock_disabled());
       }
     }
-  }, [checkNavigatorPermissions, isPointerLockPossible, settings.mouseMode]);
+  }, [isPointerLockPossible, mouseMode]);
 
   const requestKeyboardLock = useCallback(async () => {
     if (videoElm.current === null) return;
@@ -259,6 +263,14 @@ export default function WebRTCVideo({
     const signal = abortController.signal;
 
     document.addEventListener("pointerlockchange", handlePointerLockChange, { signal });
+    // Older implementations return void and report rejection through this event.
+    document.addEventListener(
+      "pointerlockerror",
+      () => {
+        notifications.error(m.video_pointer_lock_disabled());
+      },
+      { signal },
+    );
 
     return () => {
       abortController.abort();
@@ -590,8 +602,13 @@ export default function WebRTCVideo({
       const videoElmRefValue = videoElm.current;
       if (!videoElmRefValue) return;
 
-      const isRelativeMouseMode = settings.mouseMode === "relative";
-      const mouseHandler = isRelativeMouseMode ? relMouseMoveHandler : absMouseMoveHandler;
+      const isRelativeMouseMode = mouseMode === "relative";
+      const mouseHandler = (event: MouseEvent) => {
+        if (mouseMode === "disabled") return;
+        if (isRelativeMouseMode) {
+          if (document.pointerLockElement === videoElmRefValue) relMouseMoveHandler(event);
+        } else absMouseMoveHandler(event);
+      };
 
       const abortController = new AbortController();
       const signal = abortController.signal;
@@ -599,25 +616,29 @@ export default function WebRTCVideo({
       videoElmRefValue.addEventListener("mousemove", mouseHandler, { signal });
       videoElmRefValue.addEventListener("pointerdown", mouseHandler, { signal });
       videoElmRefValue.addEventListener("pointerup", mouseHandler, { signal });
-      videoElmRefValue.addEventListener("wheel", mouseWheelHandler, {
-        signal,
-        passive: true,
-      });
+      videoElmRefValue.addEventListener(
+        "wheel",
+        event => {
+          if (mouseMode === "disabled") return;
+          if (!isRelativeMouseMode || document.pointerLockElement === videoElmRefValue)
+            mouseWheelHandler(event);
+        },
+        {
+          signal,
+          passive: true,
+        },
+      );
 
       if (isRelativeMouseMode) {
         videoElmRefValue.addEventListener(
           "click",
           () => {
-            if (isPointerLockPossible && !isPointerLockActive && !document.pointerLockElement) {
+            if (!isPointerLockActive && !document.pointerLockElement) {
               requestPointerLock();
             }
           },
           { signal },
         );
-      } else {
-        // Reset the mouse position when the window is blurred or the document is hidden
-        window.addEventListener("blur", resetMousePosition, { signal });
-        document.addEventListener("visibilitychange", resetMousePosition, { signal });
       }
 
       const preventContextMenu = (e: MouseEvent) => e.preventDefault();
@@ -644,7 +665,7 @@ export default function WebRTCVideo({
       relMouseMoveHandler,
       mouseWheelHandler,
       resetMousePosition,
-      settings.mouseMode,
+      mouseMode,
     ],
   );
 
@@ -659,7 +680,7 @@ export default function WebRTCVideo({
   }, [hdmiError, isPlaying, peerConnection?.connectionState, videoHeight, videoWidth]);
 
   const showPointerLockBar = useMemo(() => {
-    if (settings.mouseMode !== "relative") return false;
+    if (mouseMode !== "relative") return false;
     if (!isPointerLockPossible) return false;
     if (isPointerLockActive) return false;
     if (isVideoLoading) return false;
@@ -671,7 +692,7 @@ export default function WebRTCVideo({
     isPointerLockActive,
     isPointerLockPossible,
     isVideoLoading,
-    settings.mouseMode,
+    mouseMode,
     videoHeight,
     videoWidth,
   ]);
@@ -723,7 +744,7 @@ export default function WebRTCVideo({
             <div className="relative grow overflow-hidden">
               <div className="flex h-full flex-col">
                 <div className="grid grow grid-rows-(--grid-bodyFooter) overflow-hidden">
-                  {/* In relative mouse mode and under https, we enable the pointer lock, and to do so we need a bar to show the user to click on the video to enable mouse control */}
+                  {/* Relative mouse control starts with a trusted click when the browser supports pointer lock. */}
                   <PointerLockBar show={showPointerLockBar} />
                   <div className="relative mx-4 my-2 flex items-center justify-center overflow-hidden">
                     <div

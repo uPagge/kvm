@@ -16,6 +16,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
 
+	"github.com/jetkvm/kvm/internal/edid"
 	"github.com/jetkvm/kvm/internal/hidrpc"
 	"github.com/jetkvm/kvm/internal/logging"
 	"github.com/jetkvm/kvm/internal/usbgadget"
@@ -100,6 +101,9 @@ func writeJSONRPCEvent(event string, params any, session *Session) {
 }
 
 func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
+	if session == nil || session.isClosed() {
+		return
+	}
 	var request JSONRPCRequest
 	err := json.Unmarshal(message.Data, &request)
 	if err != nil {
@@ -142,7 +146,18 @@ func onRPCMessage(message webrtc.DataChannelMessage, session *Session) {
 		return
 	}
 
-	result, err := callRPCHandler(scopedLogger, handler, request.Params, session)
+	var result any
+	if request.Method == "absMouseReport" || request.Method == "relMouseReport" || request.Method == "wheelReport" || request.Method == "keyboardReport" || request.Method == "keypressReport" {
+		session.hidInputLock.Lock()
+		if session.isClosed() {
+			session.hidInputLock.Unlock()
+			return
+		}
+		result, err = callRPCHandler(scopedLogger, handler, request.Params, session)
+		session.hidInputLock.Unlock()
+	} else {
+		result, err = callRPCHandler(scopedLogger, handler, request.Params, session)
+	}
 	if err != nil {
 		scopedLogger.Error().Err(err).Msg("Error calling RPC handler")
 		errorResponse := JSONRPCResponse{
@@ -224,6 +239,12 @@ func rpcGetAutoUpdateState() (bool, error) {
 }
 
 func rpcSetAutoUpdateState(enabled bool) (bool, error) {
+	if enabled {
+		return false, stockOTAUpdateGuard()
+	}
+	if config.AutoUpdateEnabled == enabled {
+		return enabled, nil
+	}
 	config.AutoUpdateEnabled = enabled
 	if err := SaveConfig(); err != nil {
 		return config.AutoUpdateEnabled, fmt.Errorf("failed to save config: %w", err)
@@ -231,7 +252,11 @@ func rpcSetAutoUpdateState(enabled bool) (bool, error) {
 	return enabled, nil
 }
 
+var edidTransactionLock sync.Mutex
+
 func rpcGetEDID() (string, error) {
+	edidTransactionLock.Lock()
+	defer edidTransactionLock.Unlock()
 	if !isHostDisplayAdvertised() {
 		return configuredVideoEDID(), nil
 	}
@@ -243,30 +268,41 @@ func rpcGetEDID() (string, error) {
 	return resp, nil
 }
 
-func rpcSetEDID(edid string) error {
-	if isInternalDisabledEDID(edid) {
+func rpcSetEDID(value string) error {
+	return setEDIDWithSave(value, SaveConfig)
+}
+
+func setEDIDWithSave(value string, save func() error) error {
+	// Include previous-value capture, hardware apply, persistence and rollback:
+	// a failed earlier request must not undo a later acknowledged request.
+	edidTransactionLock.Lock()
+	defer edidTransactionLock.Unlock()
+	if isInternalDisabledEDID(value) {
 		return fmt.Errorf("invalid EDID")
 	}
-
-	if edid == "" {
+	if value != "" {
+		if err := edid.ValidateHex(value); err != nil {
+			return fmt.Errorf("invalid EDID: %w", err)
+		}
+	}
+	if value == "" {
 		logger.Info().Msg("Restoring EDID to default")
 	} else {
-		logger.Info().Str("edid", edid).Msg("Setting EDID")
+		logger.Info().Str("edid", value).Msg("Setting EDID")
 	}
 
 	previousEDID := config.EdidString
-	config.EdidString = edid
+	config.EdidString = value
 
 	if err := reapplyHostDisplayAdvertisement("set_edid"); err != nil {
 		config.EdidString = previousEDID
-		return err
+		return errors.Join(err, reapplyHostDisplayAdvertisement("set_edid_rollback"))
 	}
 
 	// Save EDID to config, allowing it to be restored on reboot.
-	if err := SaveConfig(); err != nil {
+	if err := save(); err != nil {
 		config.EdidString = previousEDID
-		_ = reapplyHostDisplayAdvertisement("set_edid_rollback")
-		return fmt.Errorf("failed to save config: %w", err)
+		return errors.Join(fmt.Errorf("failed to save config: %w", err), reapplyHostDisplayAdvertisement("set_edid_rollback"))
 	}
 	return nil
 }
@@ -380,23 +416,33 @@ func rpcGetBacklightSettings() (*BacklightSettings, error) {
 }
 
 func rpcGetAudioConfig() (*AudioConfig, error) {
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
 	return &AudioConfig{Enabled: effectiveAudioEnabled()}, nil
 }
 
 func rpcSetAudioConfig(params AudioConfig) error {
+	return setAudioConfigWithSave(params, SaveConfig)
+}
+
+func setAudioConfigWithSave(params AudioConfig, save func() error) error {
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
 	enabled := params.Enabled
-	if enabled && (config.UsbDevices == nil || !config.UsbDevices.Audio) {
-		enabled = false
+	if enabled && (effectiveUsbDevices() == nil || !effectiveUsbDevices().Audio) {
+		return fmt.Errorf("USB audio is disabled")
 	}
 	if config.AudioEnabled == enabled {
 		return nil
 	}
+	previous := config.AudioEnabled
 	config.AudioEnabled = enabled
+	if err := save(); err != nil {
+		config.AudioEnabled = previous
+		return fmt.Errorf("failed to save config: %w", err)
+	}
 	if !effectiveAudioEnabled() {
 		stopAudio()
-	}
-	if err := SaveConfig(); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
 	}
 	return nil
 }
@@ -458,6 +504,9 @@ var (
 func rpcSetVideoStreamPaused(session *Session, paused bool) error {
 	videoPauseMu.Lock()
 	defer videoPauseMu.Unlock()
+	if session == nil || session.isClosed() {
+		return context.Canceled
+	}
 	if paused {
 		videoPausedBy = session
 		return nativeInstance.VideoStop()
@@ -782,16 +831,22 @@ func rpcGetUsbEmulationState() (bool, error) {
 }
 
 func rpcSetUsbEmulationState(enabled bool) error {
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
 	setUSBEmulationDesired(enabled)
 	return gadget.SetEmulationEnabled(enabled)
 }
 
 func rpcGetUsbConfig() (usbgadget.Config, error) {
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
 	LoadConfig()
 	return *config.UsbConfig, nil
 }
 
 func rpcSetUsbConfig(usbConfig usbgadget.Config) error {
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
 	LoadConfig()
 	config.UsbConfig = &usbConfig
 	gadget.SetGadgetConfig(config.UsbConfig)
@@ -1045,8 +1100,21 @@ func rpcSetTerminalPaused(terminalPaused bool) error {
 	return nil
 }
 
+// Serialize device/capture choices through rebind, persistence and rollback.
+// A later audio request must never observe an earlier uncommitted USB choice.
+var usbAudioTransactionLock sync.Mutex
+
 func rpcGetUsbDevices() (usbgadget.Devices, error) {
-	return *config.UsbDevices, nil
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
+	devices := effectiveUsbDevices()
+	if devices == nil {
+		return usbgadget.Devices{}, fmt.Errorf("USB configuration is not loaded")
+	}
+	if err := validateUSBProfile(devices.Profile); err != nil {
+		return usbgadget.Devices{}, err
+	}
+	return *devices, nil
 }
 
 func updateUsbRelatedConfig() error {
@@ -1064,42 +1132,94 @@ func updateUsbRelatedConfig() error {
 }
 
 func rpcSetUsbDevices(usbDevices usbgadget.Devices) error {
-	if !usbDevices.Audio {
+	return setUsbDevicesWithSaveAndUpdate(usbDevices, SaveConfig, gadgetUpdateConfig)
+}
+
+func gadgetUpdateConfig() error { return gadget.UpdateGadgetConfig() }
+
+func setUsbDevicesWithSaveAndUpdate(usbDevices usbgadget.Devices, save, update func() error) error {
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
+	return setUsbDevicesLocked(usbDevices, save, update)
+}
+
+func setUsbDevicesLocked(usbDevices usbgadget.Devices, save, update func() error) error {
+	if err := validateUSBProfile(usbDevices.Profile); err != nil {
+		return err
+	}
+	previous := effectiveUsbDevices()
+	if previous == nil {
+		return fmt.Errorf("USB configuration is not loaded")
+	}
+	if usbDevices.Profile != previous.Profile {
+		return fmt.Errorf("changing HID profile requires a configuration edit and restart")
+	}
+	normalized := usbgadget.NormalizeDevices(usbDevices)
+	if normalized != usbDevices {
+		return fmt.Errorf("USB functions conflict with HID profile %q", usbDevices.Profile)
+	}
+	if gadget == nil {
+		return fmt.Errorf("USB gadget is not initialized")
+	}
+	previousRaw, previousAudio := config.UsbDevices, config.AudioEnabled
+	previousVersion := config.StandardRelativeAudioConfigVersion
+	if err := gadget.SetGadgetDevices(&normalized); err != nil {
+		return err
+	}
+	config.UsbDevices = &normalized
+	if normalized.Profile == usbgadget.HIDProfileStandardRelative {
+		config.StandardRelativeAudioConfigVersion = 1
+	}
+	if !normalized.Audio {
 		config.AudioEnabled = false
 	}
-	config.UsbDevices = &usbDevices
+	// Postpone enumeration recovery before the transactional rebind.
+	setUSBRecoveryTimer(time.Now())
+	err := update()
+	if err == nil {
+		setUSBRecoveryTimer(time.Now())
+		err = save()
+	}
+	if err != nil {
+		config.UsbDevices, config.AudioEnabled = previousRaw, previousAudio
+		config.StandardRelativeAudioConfigVersion = previousVersion
+		rollbackErr := gadget.SetGadgetDevices(previous)
+		if rollbackErr == nil {
+			rollbackErr = update()
+		}
+		return errors.Join(err, rollbackErr)
+	}
 	if !effectiveAudioEnabled() {
 		stopAudio()
 	}
-	gadget.SetGadgetDevices(effectiveUsbDevices())
-	return updateUsbRelatedConfig()
+	return nil
 }
 
 func rpcSetUsbDeviceState(device string, enabled bool) error {
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
+	current := effectiveUsbDevices()
+	if current == nil {
+		return fmt.Errorf("USB configuration is not loaded")
+	}
+	devices := *current
 	switch device {
 	case "absoluteMouse":
-		config.UsbDevices.AbsoluteMouse = enabled
+		devices.AbsoluteMouse = enabled
 	case "relativeMouse":
-		config.UsbDevices.RelativeMouse = enabled
+		devices.RelativeMouse = enabled
 	case "keyboard":
-		config.UsbDevices.Keyboard = enabled
+		devices.Keyboard = enabled
 	case "massStorage":
-		config.UsbDevices.MassStorage = enabled
+		devices.MassStorage = enabled
 	case "serialConsole":
-		config.UsbDevices.SerialConsole = enabled
+		devices.SerialConsole = enabled
 	case "audio":
-		config.UsbDevices.Audio = enabled
-		if !enabled {
-			config.AudioEnabled = false
-		}
+		devices.Audio = enabled
 	default:
 		return fmt.Errorf("invalid device: %s", device)
 	}
-	if !effectiveAudioEnabled() {
-		stopAudio()
-	}
-	gadget.SetGadgetDevices(effectiveUsbDevices())
-	return updateUsbRelatedConfig()
+	return setUsbDevicesLocked(devices, SaveConfig, gadgetUpdateConfig)
 }
 
 func rpcSetCloudUrl(apiUrl string, appUrl string) error {
@@ -1303,8 +1423,9 @@ func rpcEmitTestLog(level string) error {
 }
 
 var (
-	keyboardMacroCancel context.CancelFunc
-	keyboardMacroLock   sync.Mutex
+	keyboardMacroCancel     context.CancelFunc
+	keyboardMacroLock       sync.Mutex
+	keyboardMacroGeneration uint64
 )
 
 // cancelKeyboardMacro cancels any ongoing keyboard macro execution
@@ -1323,32 +1444,66 @@ func setKeyboardMacroCancel(cancel context.CancelFunc) {
 	keyboardMacroLock.Lock()
 	defer keyboardMacroLock.Unlock()
 
+	keyboardMacroGeneration++
 	keyboardMacroCancel = cancel
 }
 
 func rpcExecuteKeyboardMacro(macro []hidrpc.KeyboardMacroStep) error {
-	cancelKeyboardMacro()
+	return executeKeyboardMacroForSession(macro, nil)
+}
 
+func executeKeyboardMacroForSession(macro []hidrpc.KeyboardMacroStep, session *Session) error {
+	return executeKeyboardMacroRun(macro, session, doExecuteKeyboardMacroForSession, (*Session).reportHidRPCKeyboardMacroState)
+}
+
+func executeKeyboardMacroRun(macro []hidrpc.KeyboardMacroStep, session *Session,
+	run func(context.Context, []hidrpc.KeyboardMacroStep, *Session) error,
+	report func(*Session, hidrpc.KeyboardMacroState)) error {
+	originalSession := session
+	if originalSession == nil {
+		originalSession = currentSession
+	}
+	if session != nil {
+		session.hidInputLock.Lock()
+		if session.isClosed() {
+			session.hidInputLock.Unlock()
+			return context.Canceled
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	setKeyboardMacroCancel(cancel)
-
+	defer cancel()
 	s := hidrpc.KeyboardMacroState{
 		State:   true,
 		IsPaste: true,
 	}
-
-	if currentSession != nil {
-		currentSession.reportHidRPCKeyboardMacroState(s)
+	keyboardMacroLock.Lock()
+	if keyboardMacroCancel != nil {
+		keyboardMacroCancel()
+	}
+	keyboardMacroGeneration++
+	generation := keyboardMacroGeneration
+	keyboardMacroCancel = cancel
+	// Serialize state notifications with ownership transitions so an older
+	// completion cannot arrive after a replacement's running notification.
+	if originalSession != nil {
+		report(originalSession, s)
+	}
+	keyboardMacroLock.Unlock()
+	if session != nil {
+		session.hidInputLock.Unlock()
 	}
 
-	err := rpcDoExecuteKeyboardMacro(ctx, macro)
+	err := run(ctx, macro, session)
 
-	setKeyboardMacroCancel(nil)
-
-	s.State = false
-	if currentSession != nil {
-		currentSession.reportHidRPCKeyboardMacroState(s)
+	keyboardMacroLock.Lock()
+	if keyboardMacroGeneration == generation {
+		keyboardMacroCancel = nil
+		s.State = false
+		if originalSession != nil {
+			report(originalSession, s)
+		}
 	}
+	keyboardMacroLock.Unlock()
 
 	return err
 }
@@ -1364,13 +1519,30 @@ func isClearKeyStep(step hidrpc.KeyboardMacroStep) bool {
 }
 
 func rpcDoExecuteKeyboardMacro(ctx context.Context, macro []hidrpc.KeyboardMacroStep) error {
+	return doExecuteKeyboardMacroForSession(ctx, macro, nil)
+}
+
+func doExecuteKeyboardMacroForSession(ctx context.Context, macro []hidrpc.KeyboardMacroStep, session *Session) error {
 	logger.Debug().Interface("macro", macro).Msg("Executing keyboard macro")
 
 	for i, step := range macro {
 		delay := time.Duration(step.Delay) * time.Millisecond
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if session != nil {
+			session.hidInputLock.Lock()
+			if session.isClosed() {
+				session.hidInputLock.Unlock()
+				return context.Canceled
+			}
+		}
 
 		err := rpcKeyboardReport(step.Modifier, step.Keys)
 		if err != nil {
+			if session != nil {
+				session.hidInputLock.Unlock()
+			}
 			logger.Warn().Err(err).Msg("failed to execute keyboard macro")
 			return err
 		}
@@ -1379,6 +1551,9 @@ func rpcDoExecuteKeyboardMacro(ctx context.Context, macro []hidrpc.KeyboardMacro
 		if isClearKeyStep(step) {
 			gadget.UpdateKeysDown(0, keyboardClearStateKeys)
 		}
+		if session != nil {
+			session.hidInputLock.Unlock()
+		}
 
 		// Use context-aware sleep that can be cancelled
 		select {
@@ -1386,7 +1561,17 @@ func rpcDoExecuteKeyboardMacro(ctx context.Context, macro []hidrpc.KeyboardMacro
 			// Sleep completed normally
 		case <-ctx.Done():
 			// make sure keyboard state is reset
+			if session != nil {
+				session.hidInputLock.Lock()
+				if session.isClosed() {
+					session.hidInputLock.Unlock()
+					return ctx.Err()
+				}
+			}
 			err := rpcKeyboardReport(0, keyboardClearStateKeys)
+			if session != nil {
+				session.hidInputLock.Unlock()
+			}
 			if err != nil {
 				logger.Warn().Err(err).Msg("failed to reset keyboard state")
 			}

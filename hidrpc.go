@@ -12,6 +12,18 @@ import (
 )
 
 func handleHidRPCMessage(message hidrpc.Message, session *Session) {
+	if session == nil {
+		return
+	}
+	// Macros acquire admission only for setup and individual key writes, never
+	// for their sleeps. Ordinary reports finish before close permits release.
+	if message.Type() != hidrpc.TypeKeyboardMacroReport {
+		session.hidInputLock.Lock()
+		defer session.hidInputLock.Unlock()
+		if session.isClosed() {
+			return
+		}
+	}
 	var rpcErr error
 
 	switch message.Type() {
@@ -34,7 +46,7 @@ func handleHidRPCMessage(message hidrpc.Message, session *Session) {
 			logger.Warn().Err(err).Msg("failed to get keyboard macro report")
 			return
 		}
-		rpcErr = rpcExecuteKeyboardMacro(keyboardMacroReport.Steps)
+		rpcErr = executeKeyboardMacroForSession(keyboardMacroReport.Steps, session)
 	case hidrpc.TypeCancelKeyboardMacroReport:
 		rpcCancelKeyboardMacro()
 		return

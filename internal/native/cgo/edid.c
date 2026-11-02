@@ -43,7 +43,7 @@ int get_edid(uint8_t *edid, size_t max_size)
     memset(&v4l2_edid, 0, sizeof(v4l2_edid));
     v4l2_edid.pad = 0;
     v4l2_edid.start_block = 0;
-    v4l2_edid.blocks = 2;
+    v4l2_edid.blocks = max_size / 128;
     v4l2_edid.edid = edid;
 
     if (ioctl(fd, VIDIOC_G_EDID, &v4l2_edid) < 0)
@@ -54,20 +54,34 @@ int get_edid(uint8_t *edid, size_t max_size)
     }
 
     close(fd);
+    if (v4l2_edid.blocks == 0 || v4l2_edid.blocks > max_size / 128)
+    {
+        errno = EIO;
+        return -1;
+    }
     return v4l2_edid.blocks * 128;
 }
 
-static void fix_edid_checksum(uint8_t *edid, size_t size)
+static bool valid_edid(const uint8_t *edid, size_t size)
 {
+    const uint8_t header[8] = {0, 255, 255, 255, 255, 255, 255, 0};
+    if (memcmp(edid, header, sizeof(header)) != 0 || edid[126] != size / 128 - 1)
+    {
+        return false;
+    }
     for (size_t block = 0; block < size / 128; block++)
     {
         uint8_t sum = 0;
-        for (int i = 0; i < 127; i++)
+        for (int i = 0; i < 128; i++)
         {
             sum += edid[block * 128 + i];
         }
-        edid[block * 128 + 127] = (uint8_t)(256 - sum);
+        if (sum != 0)
+        {
+            return false;
+        }
     }
+    return true;
 }
 
 int set_edid(uint8_t *edid, size_t size)
@@ -84,6 +98,14 @@ int set_edid(uint8_t *edid, size_t size)
         return -1;
     }
 
+    // Size zero is the internal HPD-disable operation, not an external EDID.
+    // Never repair user bytes silently before sending them to the kernel.
+    if (size > 0 && !valid_edid(edid, size))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
     int fd;
     struct v4l2_edid v4l2_edid;
 
@@ -92,11 +114,6 @@ int set_edid(uint8_t *edid, size_t size)
     {
         log_error("Failed to open device");
         return -1;
-    }
-
-    if (size > 0)
-    {
-        fix_edid_checksum(edid, size);
     }
 
     memset(&v4l2_edid, 0, sizeof(v4l2_edid));

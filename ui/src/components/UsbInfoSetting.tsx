@@ -34,7 +34,7 @@ export interface USBConfig {
 const usbConfigs = [
   {
     label: m.usb_config_default(),
-    value: "USB Emulation Device",
+    value: "USB Input Device",
   },
   {
     label: m.usb_config_logitech(),
@@ -57,15 +57,14 @@ export function UsbInfoSetting() {
   const [loading, setLoading] = useState(false);
 
   const [usbConfigProduct, setUsbConfigProduct] = useState("");
-  const [deviceId, setDeviceId] = useState("");
   const usbConfigData: UsbConfigMap = useMemo(
     () => ({
-      "USB Emulation Device": {
+      "USB Input Device": {
         vendor_id: "0x1d6b",
         product_id: "0x0104",
-        serial_number: deviceId,
-        manufacturer: "JetKVM",
-        product: "USB Emulation Device",
+        serial_number: "",
+        manufacturer: "",
+        product: "USB Input Device",
       },
       "Logitech USB Input Device": {
         vendor_id: "0x046d",
@@ -89,7 +88,7 @@ export function UsbInfoSetting() {
         product: "Multimedia Pro Keyboard",
       },
     }),
-    [deviceId],
+    [],
   );
 
   const syncUsbConfigProduct = useCallback(() => {
@@ -139,15 +138,6 @@ export function UsbInfoSetting() {
   );
 
   useEffect(() => {
-    send("getDeviceID", {}, (resp: JsonRpcResponse) => {
-      if ("error" in resp) {
-        return notifications.error(
-          `Failed to get device ID: ${resp.error.data || m.unknown_error()}`,
-        );
-      }
-      setDeviceId(resp.result as string);
-    });
-
     syncUsbConfigProduct();
   }, [send, syncUsbConfigProduct]);
 

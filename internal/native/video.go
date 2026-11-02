@@ -5,17 +5,15 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	edidpkg "github.com/jetkvm/kvm/internal/edid"
 )
 
 const sleepModeFile = "/sys/devices/platform/ff470000.i2c/i2c-4/4-000f/sleep_mode"
 
 // DefaultEDID is the default EDID for the video stream.
-// CEA-861 extension with HDMI vendor block, audio support, and JetKVM manufacturer ID.
-// Base block DTDs: 1920x1080@60 (preferred, DTD0), 1280x720@120 (DTD1). 1280x720@60
-// is still advertised via the Standard Timings block (0x81C0 at offset 40). NVIDIA
-// drivers ignore non-VIC DTDs in the CTA extension, so the high-refresh DTD has to
-// live in the base block to be picked up by GeForce display settings.
-const DefaultEDID = "00FFFFFFFFFFFF0028B4010001EEFFC0302301038047287856EE91A3544C99260F5054000000D1C081C0318001010101010101010101023A801871382D40582C4500C48E2100001E773300A050D02B2030203500122C2100001A000000FD00174C0F5111000A202020202020000000FC004A65744B564D2076310A20202001D5020322D1431004012309070783010000E200CFE40D100401E305000065030C001000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000CF"
+// It is a conservative video-only 1920x1080 progressive 60 Hz profile.
+const DefaultEDID = edidpkg.Standard1080p60
 
 // DisabledEDID is an internal sentinel that disables EDID and pulls HDMI HPD low.
 const DisabledEDID = "__JETKVM_DISABLED_EDID__"
@@ -182,6 +180,11 @@ func (n *Native) VideoSetEDID(edid string) error {
 		edid = ""
 	} else if edid == "" {
 		edid = DefaultEDID
+	}
+	if !disableEDID {
+		if err := edidpkg.ValidateHex(edid); err != nil {
+			return fmt.Errorf("invalid EDID: %w", err)
+		}
 	}
 
 	setEDID := func() error {

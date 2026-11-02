@@ -65,7 +65,9 @@ func Main() {
 
 	// initialize usb gadget
 	setProcTitle("initUsbGadget")
-	initUsbGadget()
+	if err := initUsbGadget(); err != nil {
+		logger.Fatal().Err(err).Msg("USB initialization failed")
+	}
 
 	setProcTitle("initNative")
 	initNative(systemVersionLocal, appVersionLocal)
@@ -134,6 +136,11 @@ func Main() {
 
 		for {
 			logger.Info().Bool("auto_update_enabled", config.AutoUpdateEnabled).Msg("auto-update check")
+			if err := stockOTAUpdateGuard(); err != nil {
+				logger.Debug().Err(err).Msg("stock OTA is disabled for this fork")
+				time.Sleep(5 * time.Minute)
+				continue
+			}
 			if !config.AutoUpdateEnabled {
 				logger.Debug().Msg("auto-update disabled")
 				time.Sleep(5 * time.Minute) // we'll check if auto-updates are enabled in five minutes

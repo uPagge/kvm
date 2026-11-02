@@ -476,8 +476,14 @@ func handleSessionRequest(
 	}
 	if currentSession != nil {
 		writeJSONRPCEvent("otherSessionConnected", nil, currentSession)
-		gadget.CancelAllAutoReleaseTimers()
-		_ = rpcKeyboardReport(0, keyboardClearStateKeys)
+		currentSession.close()
+		cancelKeyboardMacro()
+		if gadget != nil {
+			gadget.CancelAllAutoReleaseTimers()
+		}
+		if err := rpcReleaseHIDInputs(); err != nil {
+			cloudLogger.Warn().Err(err).Msg("failed to release replaced session input")
+		}
 		peerConn := currentSession.peerConnection
 		go func() {
 			time.Sleep(1 * time.Second)

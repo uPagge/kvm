@@ -15,14 +15,24 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Devices is a struct that represents the USB devices that can be enabled on a USB gadget.
+// HIDProfile identifies a supported descriptor, function and report composition.
+type HIDProfile string
+
+const HIDProfileStandardRelative HIDProfile = "standard-relative"
+
+// HIDProfileReceiverEnumeration opts into the measured receiver descriptor.
+// Vendor commands and consumer/system report generation are not implemented.
+const HIDProfileReceiverEnumeration HIDProfile = "receiver-enumeration"
+
+// Devices represents the USB functions and their selected HID profile.
 type Devices struct {
-	AbsoluteMouse bool `json:"absolute_mouse"`
-	RelativeMouse bool `json:"relative_mouse"`
-	Keyboard      bool `json:"keyboard"`
-	MassStorage   bool `json:"mass_storage"`
-	SerialConsole bool `json:"serial_console"`
-	Audio         bool `json:"audio"`
+	Profile       HIDProfile `json:"hid_profile"`
+	AbsoluteMouse bool       `json:"absolute_mouse"`
+	RelativeMouse bool       `json:"relative_mouse"`
+	Keyboard      bool       `json:"keyboard"`
+	MassStorage   bool       `json:"mass_storage"`
+	SerialConsole bool       `json:"serial_console"`
+	Audio         bool       `json:"audio"`
 }
 
 // Config is a struct that represents the customizations for a USB gadget.
@@ -53,10 +63,11 @@ type KeysDownState struct {
 
 // UsbGadget is a struct that represents a USB gadget.
 type UsbGadget struct {
-	name          string
-	udc           string
-	kvmGadgetPath string
-	configC1Path  string
+	receiverControl receiverControlState
+	name            string
+	udc             string
+	kvmGadgetPath   string
+	configC1Path    string
 
 	configMap    map[string]gadgetConfigItem
 	customConfig Config
@@ -64,23 +75,25 @@ type UsbGadget struct {
 	configLock sync.Mutex
 
 	// Descriptor lock order: configLock (rebind only), keyboardMutex (keyboard
-	// reports only), hidLifecycle, then the per-device file lock. Never nest
-	// lifecycle read locks or hold one across the blocking LED Read. Rebind
-	// takes no keyboardMutex, so admitted keyboard work can finish first.
+	// transactions and rebind), hidLifecycle, then the per-device file lock.
+	// Rebind waits for the full keyboard state commit before lifecycle exclusion.
+	// Never nest lifecycle read locks or hold one across the blocking LED Read.
 	hidLifecycle sync.RWMutex
 	hidOpens     hidOpenTracker
 	// nil uses os.OpenFile; overridden by lifecycle tests without device access.
 	hidOpenFile func(string, int, os.FileMode) (*os.File, error)
 
-	keyboardHidFile *os.File
-	keyboardLock    sync.Mutex
-	wakeHidFile     *os.File
-	wakeHidLock     sync.Mutex
-	absMouseHidFile *os.File
-	absMouseLock    sync.Mutex
-	absMousePressed bool
-	relMouseHidFile *os.File
-	relMouseLock    sync.Mutex
+	keyboardHidFile       *os.File
+	keyboardLastWritePath string
+	keyboardLock          sync.Mutex
+	wakeHidFile           *os.File
+	wakeHidLock           sync.Mutex
+	absMouseHidFile       *os.File
+	absMouseLock          sync.Mutex
+	absMousePressed       bool
+	relMouseHidFile       *os.File
+	relMouseLock          sync.Mutex
+	relMouseButtons       byte
 
 	keyboardState byte          // keyboard latched state (NumLock, CapsLock, ScrollLock, Compose, Kana)
 	keysDownState KeysDownState // keyboard dynamic state (modifier keys and pressed keys)
@@ -98,7 +111,8 @@ type UsbGadget struct {
 
 	absMouseAccumulatedWheelY float64
 
-	lastUserInput time.Time
+	lastUserInput     time.Time
+	lastUserInputLock sync.Mutex
 
 	tx     *UsbGadgetTransaction
 	txLock sync.Mutex
@@ -157,7 +171,7 @@ func newUsbGadget(name string, configMap map[string]gadgetConfigItem, enabledDev
 		keyboardState:        0,
 		keysDownState:        KeysDownState{Modifier: 0, Keys: []byte{0, 0, 0, 0, 0, 0}}, // must be initialized to hidKeyBufferSize (6) zero bytes
 		kbdAutoReleaseTimers: make(map[byte]*time.Timer),
-		enabledDevices:       *enabledDevices,
+		enabledDevices:       NormalizeDevices(*enabledDevices),
 		lastUserInput:        time.Now(),
 		log:                  logger,
 
@@ -167,6 +181,8 @@ func newUsbGadget(name string, configMap map[string]gadgetConfigItem, enabledDev
 
 		absMouseAccumulatedWheelY: 0,
 	}
+	g.receiverControl.owned = true
+	g.loadHIDProfile()
 	if err := g.Init(); err != nil {
 		logger.Error().Err(err).Msg("failed to init USB gadget")
 		return nil
@@ -187,6 +203,12 @@ func deepCopyConfigMap(configMap map[string]gadgetConfigItem) map[string]gadgetC
 
 // Close cleans up resources used by the USB gadget
 func (u *UsbGadget) Close() error {
+	u.receiverControl.mu.Lock()
+	u.receiverControl.closed = true
+	u.receiverControl.mu.Unlock()
+	u.stopReceiverControl()
+	u.receiverControl.workers.Wait()
+
 	// Cancel keyboard state context
 	if u.keyboardStateCancel != nil {
 		u.keyboardStateCancel()
@@ -227,6 +249,9 @@ func (u *UsbGadget) Close() error {
 // After a UDC rebind, previously open /dev/hidg* handles may point to a stale
 // transport endpoint and must be reopened before use.
 func (u *UsbGadget) ResetHIDFiles() {
+	// This public operation retires cached writer files only. Recovery calls it
+	// after rebind has already started the new control reader. Transport/profile
+	// owners separately retire the responder generation behind lifecycle exclusion.
 	u.keyboardLock.Lock()
 	u.closeKeyboardHidFileLocked()
 	unlockWithLog(&u.keyboardLock, u.log, "keyboardHidFile reset")
@@ -243,6 +268,7 @@ func (u *UsbGadget) ResetHIDFiles() {
 	unlockWithLog(&u.absMouseLock, u.log, "absMouseHidFile reset")
 
 	u.relMouseLock.Lock()
+	u.relMouseButtons = 0
 	if u.relMouseHidFile != nil {
 		u.relMouseHidFile.Close()
 		u.relMouseHidFile = nil

@@ -1,6 +1,5 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 
-import { JsonRpcResponse, useJsonRpc } from "@hooks/useJsonRpc";
 import { useDeviceUiNavigation } from "@hooks/useAppNavigation";
 import { useDeviceStore } from "@hooks/stores";
 import { Button } from "@components/Button";
@@ -14,34 +13,13 @@ import { m } from "@localizations/messages.js";
 import { deleteCookie, map_locale_code_to_name } from "@/utils";
 
 export default function SettingsGeneralRoute() {
-  const { send } = useJsonRpc();
   const { navigateTo } = useDeviceUiNavigation();
-  const [autoUpdate, setAutoUpdate] = useState(true);
   const currentVersions = useDeviceStore(state => {
     const { appVersion, systemVersion } = state;
     // appVersion is "" once known on a device with no separate app.
     if (appVersion === null || !systemVersion) return null;
     return { appVersion, systemVersion };
   });
-
-  useEffect(() => {
-    send("getAutoUpdateState", {}, (resp: JsonRpcResponse) => {
-      if ("error" in resp) return;
-      setAutoUpdate(resp.result as boolean);
-    });
-  }, [send]);
-
-  const handleAutoUpdateChange = (enabled: boolean) => {
-    send("setAutoUpdateState", { enabled }, (resp: JsonRpcResponse) => {
-      if ("error" in resp) {
-        notifications.error(
-          m.general_auto_update_error({ error: resp.error.data || m.unknown_error() }),
-        );
-        return;
-      }
-      setAutoUpdate(enabled);
-    });
-  };
 
   const [currentLocale, setCurrentLocale] = useState(getLocale());
 
@@ -131,14 +109,9 @@ export default function SettingsGeneralRoute() {
           <div className="space-y-4">
             <SettingsItem
               title={m.general_auto_update_title()}
-              description={m.general_auto_update_description()}
+              description={m.fork_updates_description()}
             >
-              <Checkbox
-                checked={autoUpdate}
-                onChange={e => {
-                  handleAutoUpdateChange(e.target.checked);
-                }}
-              />
+              <Checkbox checked={false} disabled />
             </SettingsItem>
           </div>
           <div className="mt-2 flex items-center justify-between gap-x-2">

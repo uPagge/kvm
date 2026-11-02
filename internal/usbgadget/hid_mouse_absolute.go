@@ -76,10 +76,13 @@ var absoluteMouseCombinedReportDesc = []byte{
 
 func (u *UsbGadget) absMouseWriteHidFile(data []byte) error {
 	if u.absMouseHidFile == nil {
-		var err error
-		u.absMouseHidFile, err = u.openWithTimeout("/dev/hidg1", os.O_RDWR, 0666, 3*time.Second)
+		devicePath, err := u.hidDevicePath("absolute_mouse", "/dev/hidg1")
 		if err != nil {
-			return fmt.Errorf("failed to open hidg1: %w", err)
+			return err
+		}
+		u.absMouseHidFile, err = u.openWithTimeout(devicePath, os.O_RDWR, 0666, 3*time.Second)
+		if err != nil {
+			return fmt.Errorf("failed to open %s: %w", devicePath, err)
 		}
 	}
 
@@ -95,6 +98,8 @@ func (u *UsbGadget) absMouseWriteHidFile(data []byte) error {
 }
 
 func (u *UsbGadget) HasAbsoluteMouse() bool {
+	u.hidLifecycle.RLock()
+	defer u.hidLifecycle.RUnlock()
 	return u.enabledDevices.AbsoluteMouse
 }
 
@@ -103,6 +108,9 @@ func (u *UsbGadget) AbsMouseReport(x int, y int, buttons uint8) error {
 	defer u.hidLifecycle.RUnlock()
 
 	if !u.enabledDevices.AbsoluteMouse {
+		if u.restrictedRelativeProfile() {
+			return disabledHIDFunction("absolute mouse")
+		}
 		return nil
 	}
 
@@ -137,6 +145,9 @@ func (u *UsbGadget) AbsMouseWheelReport(wheelY int8, wheelX int8) error {
 	defer u.hidLifecycle.RUnlock()
 
 	if !u.enabledDevices.AbsoluteMouse {
+		if u.restrictedRelativeProfile() {
+			return disabledHIDFunction("absolute mouse wheel")
+		}
 		return nil
 	}
 

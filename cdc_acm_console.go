@@ -10,6 +10,10 @@ import (
 const cdcACMDevicePath = "/dev/ttyGS0"
 
 func handleCDCACMChannel(d *webrtc.DataChannel) {
+	if devices := effectiveUsbDevices(); devices == nil || !devices.SerialConsole {
+		_ = d.Close()
+		return
+	}
 	scopedLogger := cdcACMLogger.With().
 		Uint16("data_channel_id", *d.ID()).Logger()
 

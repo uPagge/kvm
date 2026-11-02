@@ -28,6 +28,8 @@ type UsbGadgetTransaction struct {
 	reorderSymlinkChanges *RequestedFileChange
 	// disabledFunctionKeys are the symlink removals the UDC write waits on.
 	disabledFunctionKeys []string
+	writeFile            func(string, []byte) error
+	attachmentReader     *configAttachmentReader
 }
 
 func (u *UsbGadget) newUsbGadgetTransaction(lock bool) error {
@@ -140,7 +142,7 @@ func (tx *UsbGadgetTransaction) Commit() error {
 		tx.addFileChange("gadget-finalize", *tx.reorderSymlinkChanges)
 	}
 
-	err := tx.c.Apply()
+	err := tx.applyConfigChanges()
 	if err != nil {
 		tx.log.Error().Err(err).Msg("failed to update usbgadget configuration")
 		return err
@@ -367,6 +369,18 @@ func (tx *UsbGadgetTransaction) WriteUDC() {
 	// again, so the removals come first. With every function disabled
 	// nothing stages the reorder change, so only wait on it when it exists.
 	deps := append([]string(nil), tx.disabledFunctionKeys...)
+	// A function-free legacy composition has no reorder node. Its device
+	// attributes still must finish before binding, including max_speed.
+	for _, change := range tx.c.Changes {
+		if change.When != "" {
+			continue
+		}
+		key := change.Key
+		if key == "" {
+			key = change.Path
+		}
+		deps = append(deps, key)
+	}
 	if tx.reorderSymlinkChanges != nil {
 		deps = append(deps, "reorder-symlinks")
 	}

@@ -21,6 +21,7 @@ export interface USBConfig {
 }
 
 export interface UsbDeviceConfig {
+  hid_profile?: string;
   keyboard: boolean;
   absolute_mouse: boolean;
   relative_mouse: boolean;
@@ -73,6 +74,7 @@ export function UsbDeviceSetting() {
   const usbSerial = useCapability("usb_serial");
   const { send } = useJsonRpc();
   const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const { setUsbSerialConsoleEnabled } = useUiStore();
 
   const [usbDeviceConfig, setUsbDeviceConfig] = useState<UsbDeviceConfig>(defaultUsbDeviceConfig);
@@ -91,6 +93,7 @@ export function UsbDeviceSetting() {
           ...(resp.result as UsbDeviceConfig),
         };
         setUsbDeviceConfig(usbConfigState);
+        setLoaded(true);
         setUsbSerialConsoleEnabled(usbConfigState.serial_console);
 
         // Set the appropriate preset based on current config
@@ -105,7 +108,13 @@ export function UsbDeviceSetting() {
             }),
         );
 
-        setSelectedPreset(matchingPreset ? matchingPreset.value : "custom");
+        setSelectedPreset(
+          (usbConfigState.hid_profile === "standard-relative" || usbConfigState.hid_profile === "receiver-enumeration")
+            ? "standard-relative"
+            : matchingPreset
+              ? matchingPreset.value
+              : "custom",
+        );
       }
     });
   }, [send, setUsbSerialConsoleEnabled]);
@@ -113,23 +122,27 @@ export function UsbDeviceSetting() {
   const handleUsbConfigChange = useCallback(
     (devices: UsbDeviceConfig) => {
       setLoading(true);
-      send("setUsbDevices", { devices }, async (resp: JsonRpcResponse) => {
-        if ("error" in resp) {
-          notifications.error(
-            m.usb_device_failed_set({ error: String(resp.error.data || m.unknown_error()) }),
-          );
-          setLoading(false);
-          return;
-        }
+      send(
+        "setUsbDevices",
+        { devices: { ...devices, hid_profile: usbDeviceConfig.hid_profile ?? "" } },
+        async (resp: JsonRpcResponse) => {
+          if ("error" in resp) {
+            notifications.error(
+              m.usb_device_failed_set({ error: String(resp.error.data || m.unknown_error()) }),
+            );
+            setLoading(false);
+            return;
+          }
 
-        // We need some time to ensure the USB devices are updated
-        await sleep(2000);
-        setLoading(false);
-        syncUsbDeviceConfig();
-        notifications.success(m.usb_device_updated());
-      });
+          // We need some time to ensure the USB devices are updated
+          await sleep(2000);
+          setLoading(false);
+          syncUsbDeviceConfig();
+          notifications.success(m.usb_device_updated());
+        },
+      );
     },
-    [send, syncUsbDeviceConfig],
+    [send, syncUsbDeviceConfig, usbDeviceConfig.hid_profile],
   );
 
   const onUsbConfigItemChange = useCallback(
@@ -141,6 +154,23 @@ export function UsbDeviceSetting() {
     },
     [],
   );
+
+  const handleStandardAudioChange = (enabled: boolean) => {
+    setLoading(true);
+    send("setUsbDeviceState", { device: "audio", enabled }, async (resp: JsonRpcResponse) => {
+      if ("error" in resp) {
+        notifications.error(
+          m.usb_device_failed_set({ error: String(resp.error.data || m.unknown_error()) }),
+        );
+        setLoading(false);
+        return;
+      }
+      await sleep(2000);
+      syncUsbDeviceConfig();
+      setLoading(false);
+      notifications.success(m.usb_device_updated());
+    });
+  };
 
   const handlePresetChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -163,12 +193,16 @@ export function UsbDeviceSetting() {
   }, [syncUsbDeviceConfig]);
 
   return (
-    <Fieldset disabled={loading} className="space-y-4">
+    <Fieldset disabled={loading || !loaded} className="space-y-4">
       <div className="h-px w-full bg-slate-800/10 dark:bg-slate-300/20" />
 
       <SettingsSectionHeader
         title={m.usb_device_title()}
-        description={m.usb_device_description()}
+        description={
+          selectedPreset === "standard-relative"
+            ? m.usb_standard_relative_description()
+            : m.usb_device_description()
+        }
       />
 
       <SettingsItem
@@ -181,11 +215,28 @@ export function UsbDeviceSetting() {
           label=""
           className="max-w-[292px]"
           value={selectedPreset}
+          disabled={selectedPreset === "standard-relative"}
           fullWidth
           onChange={handlePresetChange}
-          options={usbPresets}
+          options={
+            selectedPreset === "standard-relative"
+              ? [{ value: "standard-relative", label: m.usb_standard_relative_title() }]
+              : usbPresets
+          }
         />
       </SettingsItem>
+
+      {selectedPreset === "standard-relative" && usbDeviceConfig.hid_profile !== "receiver-enumeration" && (
+        <SettingsItem
+          title={m.usb_device_enable_audio_title()}
+          description={m.usb_device_enable_audio_description()}
+        >
+          <Checkbox
+            checked={usbDeviceConfig.audio}
+            onChange={e => handleStandardAudioChange(e.target.checked)}
+          />
+        </SettingsItem>
+      )}
 
       {selectedPreset === "custom" && (
         <div className="ml-2 border-l border-slate-800/10 pl-4 dark:border-slate-300/20">

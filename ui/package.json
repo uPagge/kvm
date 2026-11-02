@@ -18,7 +18,7 @@
     "i18n": "npm run i18n:resort && npm run i18n:validate && npm run i18n:compile",
     "i18n:resort": "python3 tools/resort_messages.py",
     "i18n:validate": "inlang validate --project ./localization/jetKVM.UI.inlang",
-    "i18n:compile": "paraglide-js compile --project ./localization/jetKVM.UI.inlang --outdir ./localization/paraglide",
+    "i18n:compile": "paraglide-js compile --project ./localization/jetKVM.UI.inlang --outdir ./localization/paraglide && node tools/check-translations.mjs",
     "i18n:machine-translate": "inlang machine translate --project ./localization/jetKVM.UI.inlang && npm run i18n:resort",
     "i18n:audit": "npm run i18n:find-dupes && npm run i18n:find-excess && npm run i18n:find-unused",
     "i18n:find-excess": "python3 ./tools/find_excess_messages.py",

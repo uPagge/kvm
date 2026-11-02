@@ -153,6 +153,10 @@ func (m *MQTTManager) handleUpdateInstallCommand(client mqtt.Client, msg mqtt.Me
 		mqttLogger.Warn().Msg("update install command rejected: actions are disabled")
 		return
 	}
+	if err := stockOTAUpdateGuard(); err != nil {
+		mqttLogger.Warn().Err(err).Msg("stock OTA install command rejected for this fork")
+		return
+	}
 	mqttLogger.Info().Msg("received update install command via MQTT")
 
 	// Set flag to keep in_progress state until OTA state confirms updating

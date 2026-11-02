@@ -40,6 +40,7 @@ type Session struct {
 	lastTimerResetTime       time.Time  // Track when auto-release timer was last reset
 	keepAliveJitterLock      sync.Mutex // Protect jitter compensation timing state
 	hidQueue                 []chan hidQueueMessage
+	hidInputLock             sync.Mutex // Final release waits for admitted input.
 
 	keysDownStateQueue chan usbgadget.KeysDownState
 	done               chan struct{}
@@ -151,6 +152,8 @@ func negotiateAudioCodec(offerSDP string) string {
 // gadget allows audio, and the browser advertised a codec we support. No-op
 // otherwise; the SDP answer just leaves the audio m-line inactive.
 func (s *Session) attachAudioTrack(offerSDP string) error {
+	usbAudioTransactionLock.Lock()
+	defer usbAudioTransactionLock.Unlock()
 	if !effectiveAudioEnabled() {
 		webrtcLogger.Debug().Msg("audio disabled by device config")
 		return nil
@@ -374,6 +377,8 @@ func (s *Session) isClosed() bool {
 }
 
 func (s *Session) close() {
+	s.hidInputLock.Lock()
+	defer s.hidInputLock.Unlock()
 	s.closeOnce.Do(func() {
 		close(s.done)
 	})
@@ -629,6 +634,7 @@ func newSession(config SessionConfig) (*Session, error) {
 		}
 		if connectionState == webrtc.ICEConnectionStateClosed {
 			scopedLogger.Debug().Msg("ICE Connection State is closed, unmounting virtual media")
+			session.close()
 			if session == currentSession {
 				// Cancel any ongoing keyboard report multi when session closes
 				cancelKeyboardMacro()
@@ -636,8 +642,12 @@ func newSession(config SessionConfig) (*Session, error) {
 				// then clear all keys. keyboardMutex inside KeyboardReport
 				// serialises with any auto-release goroutine already in flight,
 				// so the clear is guaranteed to be the final state.
-				gadget.CancelAllAutoReleaseTimers()
-				_ = rpcKeyboardReport(0, keyboardClearStateKeys)
+				if gadget != nil {
+					gadget.CancelAllAutoReleaseTimers()
+				}
+				if err := rpcReleaseHIDInputs(); err != nil {
+					scopedLogger.Warn().Err(err).Msg("failed to release session input")
+				}
 				currentSession = nil
 			}
 			session.close()
@@ -741,7 +751,9 @@ func onSessionConnected(session *Session) {
 
 func onLastSessionDisconnected() {
 	// Safety net: ensure all keys are released when the last session disconnects
-	_ = rpcKeyboardReport(0, keyboardClearStateKeys)
+	if err := rpcReleaseHIDInputs(); err != nil {
+		logger.Warn().Err(err).Msg("failed to release last session input")
+	}
 	// The closing session already released its own audio capture. A replacement
 	// may have connected since the zero-session decision, so do not stop its audio.
 	stopNativeVideo()

@@ -56,9 +56,26 @@ var wakeReportDesc = []byte{
 	0xc0, // END_COLLECTION
 }
 
+// measuredMK275KeyboardReportDesc is the owner's measured keyboard interface,
+// not a claim that the whole composite gadget matches that receiver. The raw
+// 59 bytes have SHA256 0b34d8e4baacc7f90438d40a29e6221f5b034238677957bb145c4f337161a809.
+// Source: jetkvm-brief/evidence/usb-comparison/host/comparison-receipt.json.
+// Input is modifiers/reserved/six keys, output is five LEDs plus padding.
+var measuredMK275KeyboardReportDesc = []byte{
+	0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x05, 0x07,
+	0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01,
+	0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x81, 0x03,
+	0x95, 0x05, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05,
+	0x91, 0x02, 0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
+	0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xa4,
+	0x00, 0x05, 0x07, 0x19, 0x00, 0x2a, 0xa4, 0x00,
+	0x81, 0x00, 0xc0,
+}
+
 // Source: https://www.kernel.org/doc/Documentation/usb/gadget_hid.txt
 // Note: Original kernel doc used 0x65 (101 keys) for both LOGICAL_MAXIMUM and USAGE_MAXIMUM,
 // but we use 0xff to support international keys like RO (0x87), Yen (0x89), Henkan (0x8a), Muhenkan (0x8b), etc.
+// Retained for the legacy profile; standard-relative selects the measured array above.
 var keyboardReportDesc = []byte{
 	0x05, 0x01, /* USAGE_PAGE (Generic Desktop)	          */
 	0x09, 0x06, /* USAGE (Keyboard)                       */
@@ -144,10 +161,16 @@ func getKeyboardState(b byte) KeyboardState {
 }
 
 func (u *UsbGadget) updateKeyboardState(state byte) {
+	u.hidLifecycle.RLock()
+	defer u.hidLifecycle.RUnlock()
 	u.keyboardStateLock.Lock()
 	defer u.keyboardStateLock.Unlock()
 
-	if state&^ValidKeyboardLedMasks != 0 {
+	validMasks := byte(ValidKeyboardLedMasks)
+	if u.restrictedRelativeProfile() {
+		validMasks = 0x1f
+	}
+	if state&^validMasks != 0 {
 		u.log.Warn().Uint8("state", state).Msg("ignoring invalid bits")
 		return
 	}
@@ -193,6 +216,7 @@ func (u *UsbGadget) SetOnKeysDownChange(f func(state KeysDownState)) {
 // DefaultAutoReleaseDuration is the default duration for auto-release of a key.
 const DefaultAutoReleaseDuration = 100 * time.Millisecond
 
+// Caller holds keyboardMutex through state commit and timer scheduling.
 func (u *UsbGadget) scheduleAutoRelease(key byte) {
 	u.kbdAutoReleaseLock.Lock()
 	defer unlockWithLog(&u.kbdAutoReleaseLock, u.log, "autoRelease scheduled")
@@ -204,9 +228,15 @@ func (u *UsbGadget) scheduleAutoRelease(key byte) {
 	// TODO: make this configurable
 	// We currently hardcode the duration to 100ms
 	// However, it should be the same as the duration of the keep-alive reset called baseExtension.
-	u.kbdAutoReleaseTimers[key] = time.AfterFunc(100*time.Millisecond, func() {
-		u.performAutoRelease(key)
+	var timer *time.Timer
+	timer = time.AfterFunc(100*time.Millisecond, func() {
+		// Acquire before reading the captured timer: scheduleAutoRelease's
+		// caller still owns this mutex until timer assignment is complete.
+		keyboardMutex.Lock()
+		defer keyboardMutex.Unlock()
+		u.performAutoReleaseLocked(key, timer)
 	})
+	u.kbdAutoReleaseTimers[key] = timer
 }
 
 func (u *UsbGadget) cancelAutoRelease(key byte) {
@@ -249,11 +279,12 @@ func (u *UsbGadget) DelayAutoReleaseWithDuration(resetDuration time.Duration) {
 	}
 }
 
-func (u *UsbGadget) performAutoRelease(key byte) {
+// Caller holds keyboardMutex. Timer identity fences a callback queued before
+// reconnect or replacement, even if Stop could not stop its running goroutine.
+func (u *UsbGadget) performAutoReleaseLocked(key byte, timer *time.Timer) {
 	u.kbdAutoReleaseLock.Lock()
 
-	if u.kbdAutoReleaseTimers[key] == nil {
-		u.log.Warn().Uint8("key", key).Msg("autoRelease timer not found")
+	if timer == nil || u.kbdAutoReleaseTimers[key] != timer {
 		u.kbdAutoReleaseLock.Unlock()
 		return
 	}
@@ -277,7 +308,7 @@ func (u *UsbGadget) performAutoRelease(key byte) {
 		return
 	}
 
-	_, err := u.keypressReport(key, false)
+	_, err := u.keypressReportLocked(key, false)
 	if err != nil {
 		u.log.Warn().Uint8("key", key).Msg("failed to release key")
 	}
@@ -365,9 +396,13 @@ func (u *UsbGadget) openKeyboardHidFileLocked(forceReopen bool) error {
 		return nil
 	}
 
-	file, err := u.openWithTimeout("/dev/hidg0", os.O_RDWR, 0666, 3*time.Second)
+	devicePath, err := u.hidDevicePath("keyboard", "/dev/hidg0")
 	if err != nil {
-		return fmt.Errorf("failed to open hidg0: %w", err)
+		return err
+	}
+	file, err := u.openWithTimeout(devicePath, os.O_RDWR, 0666, 3*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %w", devicePath, err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -380,15 +415,22 @@ func (u *UsbGadget) openKeyboardHidFileLocked(forceReopen bool) error {
 }
 
 func (u *UsbGadget) openWakeHidFileLocked(forceReopen bool) error {
+	if u.restrictedRelativeProfile() {
+		return disabledHIDFunction("wake")
+	}
 	if forceReopen {
 		u.closeWakeHidFileLocked()
 	} else if u.wakeHidFile != nil {
 		return nil
 	}
 
-	file, err := u.openWithTimeout("/dev/hidg3", os.O_WRONLY, 0666, 3*time.Second)
+	devicePath, err := u.hidDevicePath("wake_hid", "/dev/hidg3")
 	if err != nil {
-		return fmt.Errorf("failed to open hidg3: %w", err)
+		return err
+	}
+	file, err := u.openWithTimeout(devicePath, os.O_WRONLY, 0666, 3*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to open %s: %w", devicePath, err)
 	}
 
 	u.wakeHidFile = file
@@ -467,6 +509,9 @@ var keyboardMutex sync.Mutex
 func (u *UsbGadget) keyboardWriteHidFileLocked(modifier byte, keys []byte) error {
 	u.hidLifecycle.RLock()
 	defer u.hidLifecycle.RUnlock()
+	if err := u.validateKeyboardKeysLocked(keys); err != nil {
+		return err
+	}
 	u.keyboardLock.Lock()
 	defer unlockWithLog(&u.keyboardLock, u.log, "keyboardHidFile wrote")
 
@@ -474,6 +519,7 @@ func (u *UsbGadget) keyboardWriteHidFileLocked(modifier byte, keys []byte) error
 		return err
 	}
 
+	u.keyboardLastWritePath = u.keyboardHidFile.Name()
 	_, err := u.writeWithTimeout(u.keyboardHidFile, append([]byte{modifier, 0x00}, keys[:hidKeyBufferSize]...))
 	if err != nil {
 		u.logWithSuppression("keyboardWriteHidFile", 100, u.log, err, "failed to write to hidg0")
@@ -535,7 +581,31 @@ func (u *UsbGadget) UpdateKeysDown(modifier byte, keys []byte) KeysDownState {
 	return state
 }
 
+// validateKeyboardKeysLocked must run with hidLifecycle held. Modifiers are
+// represented by the separate byte; they are not valid array usages here.
+func (u *UsbGadget) validateKeyboardKeysLocked(keys []byte) error {
+	if u.restrictedRelativeProfile() {
+		for _, key := range keys {
+			if key > 0xa4 {
+				return fmt.Errorf("keyboard array usage 0x%02x exceeds measured profile maximum 0xa4", key)
+			}
+		}
+	}
+	return nil
+}
+
+func (u *UsbGadget) validateKeyboardKeys(keys []byte) error {
+	u.hidLifecycle.RLock()
+	defer u.hidLifecycle.RUnlock()
+	return u.validateKeyboardKeysLocked(keys)
+}
+
 func (u *UsbGadget) KeyboardReport(modifier byte, keys []byte) error {
+	// Validate the complete request before truncation, writes or state changes.
+	// The low-level writer revalidates under lifecycle admission as well.
+	if err := u.validateKeyboardKeys(keys); err != nil {
+		return err
+	}
 	defer u.resetUserInputTime()
 
 	if len(keys) > hidKeyBufferSize {
@@ -550,7 +620,9 @@ func (u *UsbGadget) KeyboardReport(modifier byte, keys []byte) error {
 	if err != nil && !IsHIDTemporarilyUnavailableError(err) {
 		u.log.Warn().Uint8("modifier", modifier).Uints8("keys", keys).Msg("Could not write keyboard report to hidg0")
 	}
-	u.UpdateKeysDown(modifier, keys)
+	if err == nil {
+		u.UpdateKeysDown(modifier, keys)
+	}
 	keyboardMutex.Unlock()
 
 	return err
@@ -601,7 +673,13 @@ var KeyCodeToMaskMap = map[byte]byte{
 	RightSuper:   ModifierMaskRightSuper,
 }
 
-func (u *UsbGadget) keypressReport(key byte, press bool) (KeysDownState, error) {
+// Caller holds keyboardMutex through the complete write/state/timer transaction.
+func (u *UsbGadget) keypressReportLocked(key byte, press bool) (KeysDownState, error) {
+	if _, modifier := KeyCodeToMaskMap[key]; !modifier {
+		if err := u.validateKeyboardKeys([]byte{key}); err != nil {
+			return u.GetKeysDownState(), err
+		}
+	}
 	defer u.resetUserInputTime()
 
 	l := u.log.With().Uint8("key", key).Bool("press", press).Logger()
@@ -613,8 +691,6 @@ func (u *UsbGadget) keypressReport(key byte, press bool) (KeysDownState, error) 
 	// Hold keyboardMutex for the entire read-compute-write-update sequence.
 	// This prevents concurrent callers (auto-release timers, session disconnect
 	// clears, other key events) from interleaving and causing lost updates.
-	keyboardMutex.Lock()
-
 	// IMPORTANT: This code parallels the logic in the kernel's hid-gadget driver
 	// for handling key presses and releases. It ensures that the USB gadget
 	// behaves similarly to a real USB HID keyboard. This logic is paralleled
@@ -675,16 +751,22 @@ func (u *UsbGadget) keypressReport(key byte, press bool) (KeysDownState, error) 
 	}
 
 	err := u.keyboardWriteHidFileLocked(modifier, keys)
-	newState := u.UpdateKeysDown(modifier, keys)
-	keyboardMutex.Unlock()
-
+	newState := state
+	if err == nil {
+		newState = u.UpdateKeysDown(modifier, keys)
+	}
 	return newState, err
 }
 
 func (u *UsbGadget) KeypressReport(key byte, press bool) error {
-	state, err := u.keypressReport(key, press)
+	keyboardMutex.Lock()
+	defer keyboardMutex.Unlock()
+	state, err := u.keypressReportLocked(key, press)
 	if err != nil && !IsHIDTemporarilyUnavailableError(err) {
 		u.log.Warn().Uint8("key", key).Bool("press", press).Msg("failed to report key")
+	}
+	if err != nil {
+		return err
 	}
 
 	isRolledOver := state.Keys[0] == hidErrorRollOver
@@ -707,16 +789,20 @@ func (u *UsbGadget) KeypressReport(key byte, press bool) error {
 func (u *UsbGadget) KeyboardWriteTimeoutStreak() int {
 	u.keyboardLock.Lock()
 	file := u.keyboardHidFile
+	name := u.keyboardLastWritePath
+	if file != nil {
+		name = file.Name()
+	}
 	u.keyboardLock.Unlock()
 
-	if file == nil {
+	if name == "" {
 		return 0
 	}
 
 	u.hidWriteStreakLock.Lock()
 	defer u.hidWriteStreakLock.Unlock()
 
-	return u.hidWriteTimeoutStreaks[file.Name()]
+	return u.hidWriteTimeoutStreaks[name]
 }
 
 func (u *UsbGadget) VerifyKeyboardWritable() error {

@@ -162,10 +162,10 @@ type ButtonPropsType = Pick<
   | "onMouseDown"
   | "onMouseUp"
   | "aria-label"
-  | "data-testid"
 > &
   React.ComponentProps<typeof ButtonContent> & {
     fetcher?: FetcherWithComponents<unknown>;
+    "data-testid"?: string;
   };
 
 // eslint-disable-next-line react-refresh/only-export-components

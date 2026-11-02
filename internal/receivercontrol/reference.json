@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "measured",
+  "source": "reports/hardware-20261102/receiver-reference/capture-init-child-04.json sha256:ca6a788b1ef51d03e899d50206eb9eec4cb45390845d50fc2e274fc68aa782f4",
+  "initial_notification_flags_hex": "000000",
+  "protocol_query_notification_flags_hex": "000900",
+  "connection_count_reply_hex": "10ff8102000200",
+  "slots": [
+    {
+      "slot": 1,
+      "wireless_pid": 16419,
+      "rf_protocol": 10,
+      "raw_connection_flags": 113,
+      "basic_reply_hex": "11ff83b520b41440230a00010100000000000000",
+      "extended_reply_hex": "11ff83b530000000001a4000000f000000000000",
+      "name_reply_hex": "11ff83b540012000000000000000000000000000",
+      "protocol_ping_reply_hex": "10018f00110800"
+    },
+    {
+      "slot": 2,
+      "wireless_pid": 16529,
+      "rf_protocol": 10,
+      "raw_connection_flags": 82,
+      "basic_reply_hex": "11ff83b521a40840910a00020000000000000000",
+      "extended_reply_hex": "11ff83b531000000000400000001000000000000",
+      "name_reply_hex": "11ff83b5410e576972656c657373204d6f757365",
+      "protocol_ping_reply_hex": "10028f00110800"
+    }
+  ]
+}

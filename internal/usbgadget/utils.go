@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -112,12 +113,21 @@ func compareFileContent(oldContent []byte, newContent []byte, looserMatch bool) 
 	return false
 }
 
-func (u *UsbGadget) writeWithTimeout(file *os.File, data []byte) (n int, err error) {
+type hidReportFile interface {
+	io.Writer
+	Name() string
+	SetWriteDeadline(time.Time) error
+}
+
+func (u *UsbGadget) writeWithTimeout(file hidReportFile, data []byte) (n int, err error) {
 	if err := file.SetWriteDeadline(time.Now().Add(hidWriteTimeout)); err != nil {
 		return -1, err
 	}
 
 	n, err = file.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
 	if err == nil {
 		u.resetHidWriteTimeoutStreak(file.Name())
 		u.resetLogSuppressionCounter(fmt.Sprintf("writeWithTimeout_%s", file.Name()))
@@ -140,7 +150,9 @@ func (u *UsbGadget) writeWithTimeout(file *os.File, data []byte) (n int, err err
 			"write timed out: %s",
 			file.Name(),
 		)
-		err = nil
+		if !u.restrictedRelativeProfile() {
+			err = nil
+		}
 	}
 
 	return

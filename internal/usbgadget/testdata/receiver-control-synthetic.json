@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "status": "measured",
+  "source": "SYNTHETIC TEST FIXTURE - not physical evidence",
+  "initial_notification_flags_hex": "000000",
+  "slots": [
+    {
+      "slot": 1,
+      "wireless_pid": 16385,
+      "rf_protocol": 10,
+      "raw_connection_flags": 65,
+      "protocol_ping_reply_hex": "1001001102005a",
+      "basic_reply_hex": "11ff83b520000000000000000000000000000000",
+      "extended_reply_hex": "11ff83b530000000000000000000000000000000",
+      "name_reply_hex": "11ff83b540000000000000000000000000000000"
+    },
+    {
+      "slot": 2,
+      "wireless_pid": 16386,
+      "rf_protocol": 10,
+      "raw_connection_flags": 66,
+      "protocol_ping_reply_hex": "1002001102005a",
+      "basic_reply_hex": "11ff83b521000000000000000000000000000000",
+      "extended_reply_hex": "11ff83b531000000000000000000000000000000",
+      "name_reply_hex": "11ff83b541000000000000000000000000000000"
+    }
+  ]
+}

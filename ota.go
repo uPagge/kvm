@@ -16,6 +16,12 @@ var builtAppVersion = "0.1.0+dev"
 
 var otaState *ota.State
 
+// Stock App or System artifacts have not been reviewed for this fork. Update
+// discovery stays available; writes use the reviewed rebuild/staging workflow.
+func stockOTAUpdateGuard() error {
+	return fmt.Errorf("stock OTA is disabled for this fork; rebuild from the selected upstream revision, reapply the fork patches in staging, and verify the candidate before installation")
+}
+
 func initOta() {
 	otaState = ota.NewState(ota.Options{
 		Logger:             otaLogger,
@@ -183,6 +189,9 @@ func rpcCheckUpdateComponents(params updateParams, includePreRelease bool) (*ota
 }
 
 func rpcTryUpdateComponents(params updateParams, includePreRelease bool, resetConfig bool) error {
+	if err := stockOTAUpdateGuard(); err != nil {
+		return err
+	}
 	updateParams := ota.UpdateParams{
 		DeviceID:          GetDeviceID(),
 		SKU:               GetDeviceSKU(),

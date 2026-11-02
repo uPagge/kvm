@@ -1,8 +1,9 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useJsonRpc } from "./useJsonRpc";
 import { useHidRpc } from "./useHidRpc";
 import { useMouseStore, useSettingsStore } from "./stores";
+import { useUsbProfile } from "./useUsbProfile";
 
 const calcDelta = (pos: number) => (Math.abs(pos) < 10 ? pos * 2 : pos);
 
@@ -18,7 +19,9 @@ export default function useMouse() {
   const { setMousePosition, setMouseMove } = useMouseStore();
   const [blockWheelEvent, setBlockWheelEvent] = useState(false);
 
-  const { mouseMode, scrollThrottling, invertScroll } = useSettingsStore();
+  const { scrollThrottling, invertScroll } = useSettingsStore();
+  const { mouseMode, standard } = useUsbProfile();
+  const fractionalMove = useRef({ x: 0, y: 0 });
 
   // Track last absolute mouse position for resetMousePosition
   const lastAbsPos = useRef({ x: 0, y: 0 });
@@ -33,19 +36,27 @@ export default function useMouse() {
       if (mouseMode !== "relative") return;
       // if we ignore the event, double-click will not work
       // if (x === 0 && y === 0 && buttons === 0) return;
-      const dx = calcDelta(x);
-      const dy = calcDelta(y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      const accumulatedX = (standard ? x : calcDelta(x)) + fractionalMove.current.x;
+      const accumulatedY = (standard ? y : calcDelta(y)) + fractionalMove.current.y;
+      let dx = Math.trunc(accumulatedX);
+      let dy = Math.trunc(accumulatedY);
+      fractionalMove.current = { x: accumulatedX - dx, y: accumulatedY - dy };
       // Keep L/R/M/X1/X2; drop pen-eraser and any future high bits.
-      const b = buttons & 0x1f;
-      if (rpcHidReady) {
-        reportRelMouseEvent(dx, dy, b);
-      } else {
-        // kept for backward compatibility
-        send("relMouseReport", { dx, dy, buttons: b });
-      }
+      const b = buttons & (standard ? 0x07 : 0x1f);
+      // Preserve all displacement; neither JSON int8 decoding nor the binary
+      // serializer may wrap a large movement into the opposite direction.
+      do {
+        const partX = Math.max(-127, Math.min(127, dx));
+        const partY = Math.max(-127, Math.min(127, dy));
+        if (rpcHidReady) reportRelMouseEvent(partX, partY, b);
+        else send("relMouseReport", { dx: partX, dy: partY, buttons: b });
+        dx -= partX;
+        dy -= partY;
+      } while (dx !== 0 || dy !== 0);
       setMouseMove({ x, y, buttons: b });
     },
-    [send, reportRelMouseEvent, setMouseMove, mouseMode, rpcHidReady],
+    [send, reportRelMouseEvent, setMouseMove, mouseMode, rpcHidReady, standard],
   );
 
   const getRelMouseMoveHandler = useCallback(
@@ -138,11 +149,11 @@ export default function useMouse() {
       const wheelY = (invertScroll ? 1 : -1) * clampWheel(e.deltaY);
       // X conventions already match (positive = right), but macOS Natural Scrolling
       // inverts both axes at OS level, so we negate X to counteract when inverted
-      const wheelX = (invertScroll ? -1 : 1) * clampWheel(e.deltaX);
+      const wheelX = standard ? 0 : (invertScroll ? -1 : 1) * clampWheel(e.deltaX);
 
       if (wheelY === 0 && wheelX === 0) return;
 
-      send("wheelReport", { wheelY, wheelX });
+      send("wheelReport", { wheelY: Math.trunc(wheelY), wheelX: Math.trunc(wheelX) });
 
       // Apply blocking delay based of throttling settings
       if (scrollThrottling && !blockWheelEvent) {
@@ -150,14 +161,35 @@ export default function useMouse() {
         setTimeout(() => setBlockWheelEvent(false), scrollThrottling);
       }
     },
-    [send, blockWheelEvent, scrollThrottling, invertScroll],
+    [send, blockWheelEvent, scrollThrottling, invertScroll, standard],
   );
 
   const resetMousePosition = useCallback(() => {
-    sendAbsMouseMovement(lastAbsPos.current.x, lastAbsPos.current.y, 0);
-  }, [sendAbsMouseMovement]);
+    fractionalMove.current = { x: 0, y: 0 };
+    if (mouseMode === "relative") sendRelMouseMovement(0, 0, 0);
+    else sendAbsMouseMovement(lastAbsPos.current.x, lastAbsPos.current.y, 0);
+  }, [sendAbsMouseMovement, sendRelMouseMovement, mouseMode]);
+
+  useEffect(() => {
+    const abort = new AbortController();
+    const options = { signal: abort.signal };
+    const lockChange = () => {
+      if (!document.pointerLockElement) resetMousePosition();
+    };
+    const visibility = () => {
+      if (document.hidden) resetMousePosition();
+    };
+    window.addEventListener("blur", resetMousePosition, options);
+    document.addEventListener("visibilitychange", visibility, options);
+    document.addEventListener("pointerlockchange", lockChange, options);
+    return () => {
+      abort.abort();
+      resetMousePosition();
+    };
+  }, [resetMousePosition]);
 
   return {
+    mouseMode,
     getRelMouseMoveHandler,
     getAbsMouseMoveHandler,
     getMouseWheelHandler,

@@ -3,6 +3,7 @@ package usbgadget
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 type gadgetConfigItem struct {
@@ -44,8 +45,8 @@ var defaultGadgetConfig = map[string]gadgetConfigItem{
 		configPath: []string{"strings", "0x409"},
 		attrs: gadgetAttributes{
 			"serialnumber": "",
-			"manufacturer": "JetKVM",
-			"product":      "JetKVM USB Emulation Device",
+			"manufacturer": "",
+			"product":      "USB Input Device",
 		},
 		configAttrs: gadgetAttributes{
 			"configuration": "Config 1: HID",
@@ -75,6 +76,8 @@ func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
 		return u.enabledDevices.RelativeMouse
 	case "keyboard":
 		return u.enabledDevices.Keyboard
+	case "wake_hid":
+		return !u.restrictedRelativeProfile()
 	case "mass_storage_base":
 		return u.enabledDevices.MassStorage
 	case "mass_storage_lun0":
@@ -89,8 +92,17 @@ func (u *UsbGadget) isGadgetConfigItemEnabled(itemKey string) bool {
 }
 
 func (u *UsbGadget) loadGadgetConfig() {
+	defer u.loadIdentityPolicy()
 	if u.customConfig.isEmpty {
 		u.log.Trace().Msg("using default gadget config")
+		for key, attrs := range map[string][]string{
+			"base":      {"idVendor", "idProduct"},
+			"base_info": {"manufacturer", "product", "serialnumber"},
+		} {
+			for _, attr := range attrs {
+				u.configMap[key].attrs[attr] = defaultGadgetConfig[key].attrs[attr]
+			}
+		}
 		return
 	}
 
@@ -100,6 +112,27 @@ func (u *UsbGadget) loadGadgetConfig() {
 	u.configMap["base_info"].attrs["serialnumber"] = u.customConfig.SerialNumber
 	u.configMap["base_info"].attrs["manufacturer"] = u.customConfig.Manufacturer
 	u.configMap["base_info"].attrs["product"] = u.customConfig.Product
+}
+
+// Only this measured identity has an established device revision. Keep the
+// custom identity bytes unchanged; hexadecimal spelling is case insensitive.
+func (u *UsbGadget) loadIdentityPolicy() {
+	base, ok := u.configMap["base"]
+	if !ok || base.attrs == nil {
+		return
+	}
+	base.attrs["bcdDevice"] = "0x0100"
+	base.attrs["max_speed"] = "super-speed-plus"
+	if !u.restrictedRelativeProfile() {
+		return
+	}
+	base.attrs["max_speed"] = "full-speed"
+	info := u.configMap["base_info"].attrs
+	hex := func(value string) string { return strings.TrimPrefix(strings.ToLower(value), "0x") }
+	if hex(base.attrs["idVendor"]) == "046d" && hex(base.attrs["idProduct"]) == "c534" &&
+		info["manufacturer"] == "Logitech" && info["product"] == "USB Receiver" && info["serialnumber"] == "" {
+		base.attrs["bcdDevice"] = "0x5100"
+	}
 }
 
 func (u *UsbGadget) SetGadgetConfig(config *Config) {
@@ -114,15 +147,36 @@ func (u *UsbGadget) SetGadgetConfig(config *Config) {
 	u.loadGadgetConfig()
 }
 
-func (u *UsbGadget) SetGadgetDevices(devices *Devices) {
+func (u *UsbGadget) SetGadgetDevices(devices *Devices) error {
 	u.configLock.Lock()
 	defer u.configLock.Unlock()
 
 	if devices == nil {
-		return // nothing to do
+		return nil // nothing to do
 	}
-
-	u.enabledDevices = *devices
+	if devices.Profile == HIDProfileReceiverEnumeration {
+		if _, err := u.receiverReady(); err != nil {
+			return err
+		}
+	}
+	if err := validateHIDProfile(devices.Profile); err != nil {
+		return err
+	}
+	normalized := NormalizeDevices(*devices)
+	if normalized != u.enabledDevices {
+		u.stopReceiverControl()
+		if err := u.drainReceiverControl(hidOpenDrainTimeout); err != nil {
+			return err
+		}
+	}
+	u.hidLifecycle.Lock()
+	defer u.hidLifecycle.Unlock()
+	if normalized != u.enabledDevices {
+		u.ResetHIDFiles()
+	}
+	u.enabledDevices = normalized
+	u.loadHIDProfile()
+	return nil
 }
 
 // GetConfigPath returns the path to the config item.
@@ -177,7 +231,15 @@ func mountConfigFS(path string) error {
 func (u *UsbGadget) Init() error {
 	u.configLock.Lock()
 	defer u.configLock.Unlock()
+	if err := validateHIDProfile(u.enabledDevices.Profile); err != nil {
+		return err
+	}
 
+	if u.receiverEnumerationProfile() {
+		if _, err := u.receiverReady(); err != nil {
+			return err
+		}
+	}
 	u.loadGadgetConfig()
 
 	udcs := getUdcs()
@@ -199,7 +261,7 @@ func (u *UsbGadget) Init() error {
 		u.adoptLiveGadget()
 	}
 
-	return nil
+	return u.startReceiverControl()
 }
 
 func (u *UsbGadget) UpdateGadgetConfig() error {
@@ -215,7 +277,7 @@ func (u *UsbGadget) UpdateGadgetConfig() error {
 		return u.logError("unable to update gadget config", err)
 	}
 
-	return nil
+	return u.startReceiverControl()
 }
 
 // configureUsbGadget reports whether it left an already matching, attached
@@ -229,6 +291,9 @@ func (u *UsbGadget) configureUsbGadget(resetUsb bool, forceRebind bool) (bool, e
 		adopted, err = u.configureUsbGadgetLocked(resetUsb, forceRebind)
 		return err
 	})
+	if err == nil {
+		err = u.startReceiverControl()
+	}
 	return adopted, err
 }
 

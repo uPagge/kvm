@@ -1,11 +1,11 @@
-//go:build linux && arm
-
 package kvm
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 
+	"github.com/jetkvm/kvm/internal/edid"
 	"github.com/jetkvm/kvm/internal/native"
 )
 
@@ -20,10 +20,16 @@ func TestEDIDPresets(t *testing.T) {
 	if presets[0].EDID != native.DefaultEDID {
 		t.Errorf("first preset must be the default EDID, got %q", presets[0].Name)
 	}
+	if strings.Contains(strings.ToUpper(presets[0].Name), "JETKVM") {
+		t.Fatalf("revealing default preset label: %q", presets[0].Name)
+	}
 
 	names := map[string]bool{}
 	edids := map[string]bool{}
 	for _, p := range presets {
+		if err := edid.ValidateHex(p.EDID); err != nil {
+			t.Errorf("preset %q has invalid EDID structure: %v", p.Name, err)
+		}
 		if p.Name == "" {
 			t.Errorf("preset %q has no name", p.EDID[:16])
 		}

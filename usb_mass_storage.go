@@ -41,6 +41,9 @@ func rebindAndRecoverHID(context string) error {
 }
 
 func setMassStorageMode(cdrom bool) error {
+	if err := requireMassStorage(); err != nil {
+		return err
+	}
 	mode := "0"
 	if cdrom {
 		mode = "1"
@@ -83,6 +86,9 @@ func setMassStorageMode(cdrom bool) error {
 }
 
 func mountImage(imagePath string) error {
+	if err := requireMassStorage(); err != nil {
+		return err
+	}
 	err := gadget.SetMassStorageImage("")
 	if err != nil {
 		return fmt.Errorf("remove mass storage image error: %w", err)
@@ -111,6 +117,9 @@ func initImagesFolder() error {
 }
 
 func rpcMountBuiltInImage(filename string) error {
+	if err := requireMassStorage(); err != nil {
+		return err
+	}
 	logger.Info().Str("filename", filename).Msg("Mount Built-In Image")
 	if err := initImagesFolder(); err != nil {
 		return err
@@ -153,6 +162,9 @@ func rpcMountBuiltInImage(filename string) error {
 }
 
 func getMassStorageCDROMEnabled() (bool, error) {
+	if err := requireMassStorage(); err != nil {
+		return false, err
+	}
 	massStorageFunctionPath, err := gadget.GetPath("mass_storage_lun0")
 	if err != nil {
 		return false, fmt.Errorf("failed to get mass storage path: %w", err)
@@ -300,6 +312,9 @@ func rpcGetVirtualMediaState() (*VirtualMediaState, error) {
 }
 
 func unmountImageLocked() error {
+	if devices := effectiveUsbDevices(); devices == nil || !devices.MassStorage {
+		return nil
+	}
 	virtualMediaStateMutex.Lock()
 	defer virtualMediaStateMutex.Unlock()
 
@@ -340,6 +355,9 @@ func rpcUnmountImage() error {
 var httpRangeReader *httpreadat.RangeReader
 
 func getInitialVirtualMediaState() (*VirtualMediaState, error) {
+	if devices := effectiveUsbDevices(); devices == nil || !devices.MassStorage {
+		return nil, nil
+	}
 	cdromEnabled, err := getMassStorageCDROMEnabled()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get mass storage cdrom enabled: %w", err)
@@ -394,6 +412,9 @@ func setInitialVirtualMediaState() error {
 }
 
 func prepareHTTPMount(url string, mode VirtualMediaMode) error {
+	if err := requireMassStorage(); err != nil {
+		return err
+	}
 	url = strings.TrimSpace(url)
 
 	virtualMediaStateMutex.RLock()
@@ -459,6 +480,9 @@ func rpcMountWithHTTP(url string, mode VirtualMediaMode) error {
 }
 
 func prepareStorageMount(filename string, mode VirtualMediaMode) error {
+	if err := requireMassStorage(); err != nil {
+		return err
+	}
 	virtualMediaStateMutex.Lock()
 	defer virtualMediaStateMutex.Unlock()
 	if currentVirtualMediaState != nil {

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { MdOutlineContentPasteGo } from "react-icons/md";
 import {
   LuCable,
@@ -63,12 +63,14 @@ export default function Actionbar({
   const usbSerial = useCapability("usb_serial");
   const usbSerialConsole = usbSerialConsoleEnabled && usbSerial;
   const { send } = useJsonRpc();
+  const [massStorageEnabled, setMassStorageEnabled] = useState(false);
 
   useEffect(() => {
     send("getUsbDevices", {}, (resp: JsonRpcResponse) => {
       if ("error" in resp) return;
-      const devices = resp.result as { serial_console?: boolean };
+      const devices = resp.result as { serial_console?: boolean; mass_storage?: boolean };
       setUsbSerialConsoleEnabled(devices.serial_console === true);
+      setMassStorageEnabled(devices.mass_storage === true);
     });
   }, [send, setUsbSerialConsoleEnabled]);
 
@@ -178,6 +180,7 @@ export default function Actionbar({
                   size="XS"
                   theme="light"
                   text={m.action_bar_virtual_media()}
+                  disabled={!massStorageEnabled}
                   LeadingIcon={({ className }) => {
                     return (
                       <>

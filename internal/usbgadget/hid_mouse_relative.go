@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/jetkvm/kvm/internal/receiverreport"
 )
 
 var relativeMouseConfig = gadgetConfigItem{
@@ -66,18 +68,33 @@ var relativeMouseCombinedReportDesc = []byte{
 	0xc0, //       End Collection
 }
 
+// Four-byte, report-only mouse: three buttons, padding, relative X/Y/wheel.
+var standardRelativeMouseReportDesc = []byte{
+	0x05, 0x01, 0x09, 0x02, 0xa1, 0x01,
+	0x09, 0x01, 0xa1, 0x00,
+	0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
+	0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
+	0x95, 0x01, 0x75, 0x05, 0x81, 0x03,
+	0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38,
+	0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06,
+	0xc0, 0xc0,
+}
+
 func (u *UsbGadget) relMouseWriteHidFile(data []byte) error {
 	if u.relMouseHidFile == nil {
-		var err error
-		u.relMouseHidFile, err = u.openWithTimeout("/dev/hidg2", os.O_RDWR, 0666, 3*time.Second)
+		devicePath, err := u.hidDevicePath("relative_mouse", "/dev/hidg2")
 		if err != nil {
-			return fmt.Errorf("failed to open hidg1: %w", err)
+			return err
+		}
+		u.relMouseHidFile, err = u.openWithTimeout(devicePath, os.O_RDWR, 0666, 3*time.Second)
+		if err != nil {
+			return fmt.Errorf("failed to open %s: %w", devicePath, err)
 		}
 	}
 
 	_, err := u.writeWithTimeout(u.relMouseHidFile, data)
 	if err != nil {
-		u.logWithSuppression("relMouseWriteHidFile", 100, u.log, err, "failed to write to hidg2")
+		u.logWithSuppression("relMouseWriteHidFile", 100, u.log, err, "failed to write relative mouse report")
 		u.relMouseHidFile.Close()
 		u.relMouseHidFile = nil
 		return err
@@ -97,16 +114,25 @@ func (u *UsbGadget) RelMouseReport(mx int8, my int8, buttons uint8) error {
 	u.relMouseLock.Lock()
 	defer u.relMouseLock.Unlock()
 
-	err := u.relMouseWriteHidFile([]byte{
-		buttons,  // Buttons
-		byte(mx), // X
-		byte(my), // Y
-		0,        // Wheel
-		0,        // AC Pan (Horizontal Scroll)
-	})
+	if u.standardRelativeProfile() && (mx == -128 || my == -128 || buttons&^uint8(7) != 0) {
+		return fmt.Errorf("relative mouse input outside profile range or button mask")
+	}
+	report := []byte{buttons, byte(mx), byte(my), 0, 0}
+	if u.standardRelativeProfile() {
+		report = report[:4]
+	}
+	if u.receiverEnumerationProfile() {
+		encoded, err := receiverreport.EncodeMouse(mx, my, buttons, 0, 0)
+		if err != nil {
+			return err
+		}
+		report = encoded[:]
+	}
+	err := u.relMouseWriteHidFile(report)
 	if err != nil {
 		return err
 	}
+	u.relMouseButtons = buttons
 
 	u.resetUserInputTime()
 	return nil
@@ -122,19 +148,29 @@ func (u *UsbGadget) RelMouseWheelReport(wheelY int8, wheelX int8) error {
 
 	u.relMouseLock.Lock()
 	defer u.relMouseLock.Unlock()
+	if u.standardRelativeProfile() && (wheelY == -128 || wheelX != 0) {
+		return fmt.Errorf("relative mouse wheel outside profile range or unsupported horizontal scroll")
+	}
 
 	if wheelY == 0 && wheelX == 0 {
 		return nil
 	}
 
-	err := u.relMouseWriteHidFile([]byte{
-		0,            // Buttons (none)
-		0,            // X
-		0,            // Y
-		byte(wheelY), // Wheel (signed)
-		byte(wheelX), // AC Pan (signed)
-	})
+	report := []byte{u.relMouseButtons, 0, 0, byte(wheelY), byte(wheelX)}
+	if u.standardRelativeProfile() {
+		report = report[:4]
+	}
+	if u.receiverEnumerationProfile() {
+		encoded, err := receiverreport.EncodeMouse(0, 0, u.relMouseButtons, wheelY, wheelX)
+		if err != nil {
+			return err
+		}
+		report = encoded[:]
+	}
+	if err := u.relMouseWriteHidFile(report); err != nil {
+		return err
+	}
 
 	u.resetUserInputTime()
-	return err
+	return nil
 }

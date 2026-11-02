@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux && arm && cgo
 
 // TODO: use a generator to generate the cgo code for the native functions
 // there's too much boilerplate code to write manually
@@ -413,6 +413,10 @@ func videoGetEDID() (string, error) {
 	defer cgoLock.Unlock()
 
 	edidCStr := C.jetkvm_video_get_edid_hex()
+	if edidCStr == nil {
+		return "", fmt.Errorf("failed to read EDID from capture device")
+	}
+	defer C.free(unsafe.Pointer(edidCStr))
 	return C.GoString(edidCStr), nil
 }
 
